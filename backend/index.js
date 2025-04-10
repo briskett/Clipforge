@@ -144,21 +144,24 @@ const SAMPLE_DATA = {
 // Generate ASS subtitle file with animations
 function generateASSSubtitles(subtitles) {
     let assContent = `[Script Info]
-Title: Basic Subtitles
+Title: RuneScape Subtitles
 ScriptType: v4.00+
 
 [V4+ Styles]
-Format: Name, Fontname, Fontsize
-Style: Default,Runescape UF Regular,24
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Runescape UF Regular,36,&H00F8F800,&H000000FF,&H006B4B11,&H80000000,0,0,0,0,100,100,0,0,1,3,2,2,20,20,30,0
 
 [Events]
-Format: Layer, Start, End, Style, Text
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-    subtitles.forEach((sub) => {
+    subtitles.forEach(sub => {
         const start = formatASSTime(sub.start);
         const end = formatASSTime(sub.end);
-        assContent += `Dialogue: 0,${start},${end},Default,${sub.text}\\N\n`;
+
+        // SIMPLIFIED EFFECTS THAT ACTUALLY WORK:
+        assContent += `Dialogue: 0,${start},${end},Default,,0,0,0,,` +
+            `{\\fad(200,200)\\3c&H00B8860B\\be1}${sub.text}\\N\n`;
     });
 
     return assContent;
