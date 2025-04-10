@@ -149,7 +149,7 @@ ScriptType: v4.00+
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize
-Style: Default,Arial,24
+Style: Default,Runescape UF Regular,24
 
 [Events]
 Format: Layer, Start, End, Style, Text
