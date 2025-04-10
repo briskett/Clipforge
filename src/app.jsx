@@ -28,11 +28,19 @@ function App() {
     };
 
     const generateClip = async () => {
+        if (!file) {
+            alert('Please upload a video first');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('video', file);
+        formData.append('startTime', startTime);
+        formData.append('endTime', endTime);
+
         try {
-            const response = await axios.post('http://localhost:5000/generate-clip', {
-                videoId,
-                startTime,
-                endTime
+            const response = await axios.post('http://localhost:5000/generate-clip', formData, {
+                headers: { 'Content-Type': 'multipart/form-data' }
             });
             setClipUrl(response.data.clipPath);
         } catch (error) {
@@ -81,9 +89,31 @@ function App() {
         }
     };
 
+    const addSubtitlesToClip = async (clipPath) => {
+        try {
+            setProgress('Adding subtitles...');
+            const response = await axios.post('http://localhost:5000/add-subtitles', {
+                clipPath: clipPath
+            });
+
+            // Update the clip in state with the subtitled version
+            setAutoClips(prevClips =>
+                prevClips.map(clip =>
+                    clip.path === clipPath
+                        ? { ...clip, subtitledPath: response.data.subtitledPath }
+                        : clip
+                )
+            );
+            setProgress('Subtitles added successfully!');
+        } catch (error) {
+            console.error('Error adding subtitles:', error);
+            alert('Failed to add subtitles: ' + error.message);
+        }
+    };
+
     return (
         <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
-            <h1>Clipping Software V0.1</h1>
+            <h1>Clipping Software V0.2</h1>
 
             {/* File Upload Section */}
             <div style={{ marginBottom: '20px', padding: '20px', border: '1px solid #ddd', borderRadius: '5px' }}>
@@ -106,34 +136,32 @@ function App() {
             </div>
 
             {/* Manual Clip Generation */}
-            {videoId && (
-                <div style={{ marginBottom: '20px', padding: '20px', border: '1px solid #ddd', borderRadius: '5px' }}>
-                    <h2>Manual Clip Generation</h2>
-                    <div style={{ marginBottom: '10px' }}>
-                        <label style={{ marginRight: '10px' }}>
-                            Start Time (seconds):
-                            <input
-                                type="number"
-                                value={startTime}
-                                onChange={(e) => setStartTime(Number(e.target.value))}
-                                style={{ marginLeft: '5px' }}
-                            />
-                        </label>
-                        <label>
-                            End Time (seconds):
-                            <input
-                                type="number"
-                                value={endTime}
-                                onChange={(e) => setEndTime(Number(e.target.value))}
-                                style={{ marginLeft: '5px' }}
-                            />
-                        </label>
-                    </div>
-                    <button onClick={generateClip}>
-                        Generate Manual Clip
-                    </button>
+            <div style={{ marginBottom: '20px', padding: '20px', border: '1px solid #ddd', borderRadius: '5px' }}>
+                <h2>Manual Clip Generation</h2>
+                <div style={{ marginBottom: '10px' }}>
+                    <label style={{ marginRight: '10px' }}>
+                        Start Time (seconds):
+                        <input
+                            type="number"
+                            value={startTime}
+                            onChange={(e) => setStartTime(Number(e.target.value))}
+                            style={{ marginLeft: '5px' }}
+                        />
+                    </label>
+                    <label>
+                        End Time (seconds):
+                        <input
+                            type="number"
+                            value={endTime}
+                            onChange={(e) => setEndTime(Number(e.target.value))}
+                            style={{ marginLeft: '5px' }}
+                        />
+                    </label>
                 </div>
-            )}
+                <button onClick={generateClip} disabled={!file}>
+                    Generate Manual Clip
+                </button>
+            </div>
 
             {/* Results Section */}
             <div>
@@ -158,11 +186,32 @@ function App() {
                                 <h4>Highlight #{index + 1}</h4>
                                 <p><strong>Reason:</strong> {clip.reason}</p>
                                 <p><strong>Segment:</strong> {clip.start.toFixed(1)}s - {clip.end.toFixed(1)}s</p>
+
                                 <video
                                     src={`http://localhost:5000/${clip.path}`}
                                     controls
-                                    style={{ width: '100%', maxWidth: '600px' }}
+                                    style={{ width: '100%', maxWidth: '600px', marginBottom: '10px' }}
                                 />
+
+                                {!clip.subtitledPath && (
+                                    <button
+                                        onClick={() => addSubtitlesToClip(clip.path)}
+                                        style={{ marginRight: '10px' }}
+                                    >
+                                        Add Subtitles
+                                    </button>
+                                )}
+
+                                {clip.subtitledPath && (
+                                    <div>
+                                        <h5>With Subtitles:</h5>
+                                        <video
+                                            src={`http://localhost:5000/${clip.subtitledPath}`}
+                                            controls
+                                            style={{ width: '100%', maxWidth: '600px' }}
+                                        />
+                                    </div>
+                                )}
                             </div>
                         ))}
                     </div>
