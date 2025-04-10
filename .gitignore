@@ -26,3 +26,5 @@ backend/temp/
 *.njsproj
 *.sln
 *.sw?
+*.mp4
+

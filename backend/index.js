@@ -181,13 +181,30 @@ async function generateBasicClip(videoPath, startTime, endTime, outputPath) {
 
         // Add short-form vertical video conversion if enabled
         if (ENABLE_SHORT_FORM) {
+            // Simplified and corrected filter chain
             command
                 .videoFilters([
-                    'scale=1080:1920', // Vertical 9:16 aspect
-                    'crop=1080:1920',   // Ensure exact dimensions
-                    'setsar=1:1'        // Set sample aspect ratio
+                    {
+                        filter: 'scale',
+                        options: {
+                            w: 1080,
+                            h: 1920,
+                            force_original_aspect_ratio: 'increase'
+                        }
+                    },
+                    {
+                        filter: 'crop',
+                        options: {
+                            w: 1080,
+                            h: 1920
+                        }
+                    }
                 ])
-                .outputOptions('-movflags faststart');
+                .outputOptions([
+                    '-movflags +faststart',
+                    '-preset fast',
+                    '-crf 18'
+                ]);
         }
 
         command
