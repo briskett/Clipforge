@@ -12,7 +12,7 @@ const app = express();
 const port = 5000;
 
 // Configuration
-const TEST_MODE = true; // Set to false to use real OpenAI API
+const TEST_MODE = false; // Set to false to use real OpenAI API
 const ENABLE_SHORT_FORM = true; // Set to false for normal 16:9 videos
 
 app.use(cors());
@@ -96,7 +96,6 @@ async function getTimedTranscript(audioPath) {
     return parseSRT(response);
 }
 
-// Parse SRT format to extract word timings
 function parseSRT(srtContent) {
     const blocks = srtContent.split('\n\n');
     const subtitles = [];
@@ -109,16 +108,46 @@ function parseSRT(srtContent) {
 
         const [start, end] = lines[1].split(' --> ').map(parseSRTTime);
         const text = lines.slice(2).join(' ');
+        const words = text.split(' ');
+        const totalDuration = end - start;
 
-        subtitles.push({
-            start,
-            end,
-            text
+        const groupSize = 3;
+        const minGroupSize = 2;
+
+        let chunks = [];
+        for (let i = 0; i < words.length; i += groupSize) {
+            const remaining = words.length - i;
+            if (remaining < minGroupSize && chunks.length > 0) {
+                chunks[chunks.length - 1].push(...words.slice(i));
+                break;
+            }
+            chunks.push(words.slice(i, i + groupSize));
+        }
+
+        // 🔥 NEW: smarter timing distribution using character length
+        const totalChars = chunks.reduce((sum, chunk) => sum + chunk.join(' ').length, 0);
+        let currentStart = start;
+
+        chunks.forEach(chunkWords => {
+            const chunkText = chunkWords.join(' ');
+            const weight = chunkText.length / totalChars;
+            const chunkDuration = totalDuration * weight;
+            const chunkEnd = currentStart + chunkDuration;
+
+            subtitles.push({
+                start: currentStart,
+                end: chunkEnd,
+                text: chunkText
+            });
+
+            currentStart = chunkEnd;
         });
     });
 
     return subtitles;
 }
+
+
 
 function parseSRTTime(timeStr) {
     const [hms, ms] = timeStr.split(',');
@@ -143,28 +172,25 @@ const SAMPLE_DATA = {
 
 // Generate ASS subtitle file with animations
 function generateASSSubtitles(subtitles) {
-    let assContent = `[Script Info]
-Title: RuneScape Subtitles
+    return `[Script Info]
+Title: RuneScape Pop Subtitles
 ScriptType: v4.00+
+PlayResX: 384
+PlayResY: 288
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Runescape UF Regular,36,&H00F8F800,&H000000FF,&H006B4B11,&H80000000,0,0,0,0,100,100,0,0,1,3,2,2,20,20,30,0
+Style: Default,Runescape UF Regular,42,&H0000FFFF,&H000000FF,&H00303030,&H80000000,0,0,0,0,100,100,0,0,1,1,1,2,20,20,30,0
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-`;
-
-    subtitles.forEach(sub => {
-        const start = formatASSTime(sub.start);
-        const end = formatASSTime(sub.end);
-
-        // SIMPLIFIED EFFECTS THAT ACTUALLY WORK:
-        assContent += `Dialogue: 0,${start},${end},Default,,0,0,0,,` +
-            `{\\fad(200,200)\\3c&H00B8860B\\be1}${sub.text}\\N\n`;
-    });
-
-    return assContent;
+${
+        subtitles.map(sub => {
+            const start = formatASSTime(sub.start);
+            const end = formatASSTime(sub.end);
+            return `Dialogue: 0,${start},${end},Default,,0,0,0,,{\\fad(50,50)}${sub.text}\\N`;
+        }).join('\n')
+    }`;
 }
 
 function formatASSTime(seconds) {
@@ -206,7 +232,8 @@ async function generateBasicClip(videoPath, startTime, endTime, outputPath) {
                 .outputOptions([
                     '-movflags +faststart',
                     '-preset fast',
-                    '-crf 18'
+                    '-crf' +
+                    ' 18'
                 ]);
         }
 
@@ -261,27 +288,43 @@ async function findHighlights(transcript, videoDuration) {
     }
 
     const prompt = `
-  Analyze this video transcript and suggest 3-5 short clips (each 30-60 seconds) that would be most engaging.
-  Consider moments with:
-  - Emotional peaks (excitement, surprise)
-  - Important information
-  - Interesting transitions
-  - Unique insights
-  
-  Video duration: ${videoDuration} seconds
-  Format your response as JSON with this structure:
-  {
-      "clips": [
-          {
-              "start": 42.5,
-              "end": 48.2,
-              "reason": "Exciting moment when the speaker reveals the key finding"
-          }
-      ]
-  }
-  
-  Transcript: ${transcript}
-  `;
+You are a professional video editor specializing in creating viral short-form content. Analyze this transcript and identify the absolute BEST 3-5 clips (30-60 seconds each) that would perform well on platforms like TikTok, Instagram Reels, and YouTube Shorts.
+
+## Selection Criteria (in order of priority):
+1. **Hook Potential** - First 3 seconds must be extremely attention-grabbing
+2. **Emotional Impact** - Look for:
+   - Surprising revelations
+   - Controversial statements
+   - Inspiring moments
+   - Humorous segments
+3. **Educational Value** - Clear, actionable insights that viewers would screenshot
+4. **Story Arc** - Should feel like a complete mini-story (setup, tension, resolution)
+5. **Pacing** - Prefer segments with varied vocal energy (not monotone)
+
+## Technical Requirements:
+- Clip duration MUST be between 30-60 seconds
+- Always include 0.5s buffer before/after the selected segment
+- Never cut mid-sentence
+- Prefer segments where speaker is building to a climax
+
+## Output Format (STRICT JSON):
+{
+  "clips": [
+    {
+      "start": 42.5, // Exact start time (seconds)
+      "end": 72.3,   // Exact end time (seconds)
+      "title": "The shocking truth about...", // Viral-style title
+      "reason": "Contains a surprising statistic followed by emotional reaction", // Why this will perform well
+      "hook_text": "You won't believe what happens at 0:43", // Text for the first frame
+      "keywords": ["surprise", "revelation", "shocking"] // SEO/tag keywords
+    }
+  ],
+  "summary": "This video contains 3 viral-worthy moments focusing on..." // Overall assessment
+}
+
+## Transcript (${videoDuration}s total):
+${transcript}
+`;
 
     const response = await openai.chat.completions.create({
         model: "gpt-4-turbo",
@@ -376,34 +419,49 @@ app.post('/auto-generate-clips', upload.single('video'), async (req, res) => {
         const videoPath = req.file.path;
         const videoName = req.file.filename;
 
+        console.log(`📥 Uploaded video: ${videoName}`);
+
         // Save to database
         const [dbResult] = await db.promise().query(
             'INSERT INTO videos (file_name, file_path) VALUES (?, ?)',
             [videoName, videoPath]
         );
         const videoId = dbResult.insertId;
+        console.log(`🗃️ Saved video to DB (ID: ${videoId})`);
 
         // Get video duration
         const duration = await getVideoDuration(videoPath);
+        console.log(`⏱️ Video duration: ${duration.toFixed(2)} seconds`);
 
-        // Extract audio and get transcript
+        // Extract audio
+        console.log(`🎧 Extracting audio from video...`);
         const audioPath = await extractAudio(videoPath);
+        console.log(`✅ Audio extracted: ${audioPath}`);
+
+        // Get transcript
+        console.log(`📝 Transcribing audio with Whisper...`);
         const transcript = await getTranscript(audioPath);
         fs.unlinkSync(audioPath);
+        console.log(`✅ Transcription complete.`);
 
         // Find highlights
+        console.log(`✨ Finding viral highlights in transcript...`);
         const clips = await findHighlights(transcript, duration);
+        console.log(`🎯 Found ${clips.length} highlight(s).`);
 
-        // Generate basic clips
         const generatedClips = [];
-        for (const clip of clips) {
+
+        for (const [index, clip] of clips.entries()) {
             try {
+                console.log(`📦 Generating clip ${index + 1}/${clips.length} (${clip.start}s → ${clip.end}s)`);
+
                 const clipName = `clip-${Date.now()}-${Math.floor(Math.random() * 1000)}.mp4`;
                 const clipPath = path.join('clips', clipName);
 
                 await generateBasicClip(videoPath, clip.start, clip.end, clipPath);
+                console.log(`✅ Clip saved: ${clipPath}`);
 
-                // Save to database
+                // Save to DB
                 await db.promise().query(
                     'INSERT INTO clips (video_id, start_time, end_time, clip_path, reason) VALUES (?, ?, ?, ?, ?)',
                     [videoId, clip.start, clip.end, clipPath, clip.reason]
@@ -416,9 +474,11 @@ app.post('/auto-generate-clips', upload.single('video'), async (req, res) => {
                     reason: clip.reason
                 });
             } catch (error) {
-                console.error(`Failed to generate clip ${clip.start}-${clip.end}:`, error);
+                console.error(`❌ Failed to generate clip ${clip.start}-${clip.end}:`, error);
             }
         }
+
+        console.log(`🚀 Clip generation complete. Total generated: ${generatedClips.length}`);
 
         res.json({
             success: true,
@@ -426,7 +486,7 @@ app.post('/auto-generate-clips', upload.single('video'), async (req, res) => {
             videoId
         });
     } catch (error) {
-        console.error("Auto clip generation failed:", error);
+        console.error("❌ Auto clip generation failed:", error);
         res.status(500).json({
             success: false,
             error: "Clip generation failed",
@@ -434,6 +494,7 @@ app.post('/auto-generate-clips', upload.single('video'), async (req, res) => {
         });
     }
 });
+
 
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);
