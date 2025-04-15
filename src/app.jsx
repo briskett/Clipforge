@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef  } from 'react';
 import axios from 'axios';
+import SubtitleEditor from './components/SubtitleEditor.jsx';
 
 function App() {
     const [file, setFile] = useState(null);
@@ -10,6 +11,11 @@ function App() {
     const [autoClips, setAutoClips] = useState([]);
     const [isProcessing, setIsProcessing] = useState(false);
     const [progress, setProgress] = useState('');
+    const [editableSubtitles, setEditableSubtitles] = useState([]);
+    const [selectedClipPath, setSelectedClipPath] = useState(null);
+    const [currentSubtitleText, setCurrentSubtitleText] = useState('');
+
+    const videoRef = useRef(null);
 
     const uploadVideo = async () => {
         const formData = new FormData();
@@ -48,6 +54,21 @@ function App() {
             alert('Clip generation failed: ' + error.message);
         }
     };
+
+    const fetchSubtitles = async (clipPath) => {
+        try {
+            const response = await axios.post('http://localhost:5000/generate-subtitles-json', {
+                clipPath
+            });
+            setEditableSubtitles(response.data.subtitles);
+            setSelectedClipPath(clipPath);
+            setProgress('Subtitles loaded for editing!');
+        } catch (error) {
+            console.error('Failed to fetch subtitles:', error);
+            alert('Failed to load subtitles: ' + error.message);
+        }
+    };
+
 
     const generateAutoClips = async () => {
         if (!file) {
@@ -109,6 +130,16 @@ function App() {
             console.error('Error adding subtitles:', error);
             alert('Failed to add subtitles: ' + error.message);
         }
+    };
+
+    const handleTimeUpdate = () => {
+        const currentTime = videoRef.current?.currentTime || 0;
+
+        const match = editableSubtitles.find(
+            sub => currentTime >= sub.start && currentTime <= sub.end
+        );
+
+        setCurrentSubtitleText(match ? match.text : '');
     };
 
     return (
@@ -194,13 +225,21 @@ function App() {
                                 />
 
                                 {!clip.subtitledPath && (
-                                    <button
-                                        onClick={() => addSubtitlesToClip(clip.path)}
-                                        style={{ marginRight: '10px' }}
-                                    >
-                                        Add Subtitles
-                                    </button>
+                                    <>
+                                        <button
+                                            onClick={() => fetchSubtitles(clip.path)}
+                                            style={{ marginRight: '10px' }}
+                                        >
+                                            Edit Subtitles
+                                        </button>
+                                        <button
+                                            onClick={() => addSubtitlesToClip(clip.path)}
+                                        >
+                                            Auto-Burn Subtitles
+                                        </button>
+                                    </>
                                 )}
+
 
                                 {clip.subtitledPath && (
                                     <div>
@@ -214,11 +253,76 @@ function App() {
                                 )}
                             </div>
                         ))}
+                        {/* Subtitle Editor below all clips */}
+                        {editableSubtitles.length > 0 && selectedClipPath && (
+                            <div style={{padding: '20px', borderTop: '2px solid #ccc', marginTop: '30px'}}>
+                                <h3>Editing Subtitles for: {selectedClipPath}</h3>
+                                <div style={{ position: 'relative', width: '100%', maxWidth: '600px', marginBottom: '20px' }}>
+                                    <video
+                                        ref={videoRef}
+                                        src={`http://localhost:5000/${selectedClipPath}`}
+                                        onTimeUpdate={handleTimeUpdate}
+                                        controls
+                                        style={{ width: '100%' }}
+                                    />
+                                    <div
+                                        style={{
+                                            position: 'absolute',
+                                            bottom: '10%',
+                                            width: '100%',
+                                            textAlign: 'center',
+                                            fontSize: '24px',
+                                            color: 'white',
+                                            textShadow: '2px 2px 8px black',
+                                            pointerEvents: 'none'
+                                        }}
+                                    >
+                                        {currentSubtitleText}
+                                    </div>
+                                </div>
+
+                                <SubtitleEditor
+                                    subtitles={editableSubtitles}
+                                    onUpdate={setEditableSubtitles}
+                                />
+
+                                <button
+                                    onClick={async () => {
+                                        try {
+                                            setProgress('Burning final subtitles...');
+                                            const response = await axios.post('http://localhost:5000/burn-edited-subtitles', {
+                                                clipPath: selectedClipPath,
+                                                subtitles: editableSubtitles
+                                            });
+
+                                            setProgress('Subtitles burned successfully!');
+
+                                            setAutoClips(prev =>
+                                                prev.map(clip =>
+                                                    clip.path === selectedClipPath
+                                                        ? {...clip, subtitledPath: response.data.subtitledPath}
+                                                        : clip
+                                                )
+                                            );
+                                        } catch (err) {
+                                            console.error('Burn failed:', err);
+                                            alert('Failed to burn subtitles');
+                                        }
+                                    }}
+                                    style={{marginTop: '10px'}}
+                                >
+                                    Burn Final Subtitles
+                                </button>
+
+
+                            </div>
+                        )}
                     </div>
                 )}
             </div>
         </div>
     );
 }
+
 
 export default App;

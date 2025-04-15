@@ -13,11 +13,16 @@ const app = express();
 const port = 5000;
 
 // Configuration
-const TEST_MODE = false; // Set to false to use real OpenAI API
+const TEST_MODE = true; // Set to false to use real OpenAI API
 const ENABLE_SHORT_FORM = false; // Set to false for normal 16:9 videos
 
 app.use(cors());
 app.use(express.json());
+app.use('/clips', express.static(path.join(__dirname, 'clips')));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/clips', express.static(path.join(__dirname, 'clips')));
+app.use('/temp', express.static(path.join(__dirname, 'temp')));
+
 
 // Initialize OpenAI
 const openai = new OpenAI({
@@ -87,6 +92,38 @@ async function runWhisperX(audioPath, outputDir) {
         });
     });
 }
+
+// Generate subtitles only (no burning)
+app.post('/generate-subtitles-json', async (req, res) => {
+    try {
+        const { clipPath } = req.body;
+
+        const audioPath = await extractAudio(clipPath);
+        const outputDir = 'whisperx_output';
+        if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
+
+        console.log("🧠 Running WhisperX on:", audioPath);
+        const jsonPath = await runWhisperX(audioPath, outputDir);
+
+        console.log("📖 Parsing WhisperX output JSON:", jsonPath);
+        const words = loadWhisperXWords(jsonPath);
+        const subtitles = groupWordsIntoSubtitles(words);
+
+        fs.unlinkSync(audioPath);
+
+        res.json({
+            success: true,
+            subtitles
+        });
+
+    } catch (error) {
+        console.error("❌ Failed to generate subtitle JSON:", error);
+        res.status(500).json({
+            success: false,
+            error: "Failed to generate subtitle JSON"
+        });
+    }
+});
 
 // Helper function to extract audio for transcription
 function extractAudio(videoPath) {
@@ -423,7 +460,8 @@ app.post('/generate-clip', upload.single('video'), async (req, res) => {
     }
 });
 
-// Add subtitles to existing clip
+
+// MODIFIED: add-subtitles route using WhisperX
 app.post('/add-subtitles', async (req, res) => {
     try {
         const { clipPath } = req.body;
@@ -460,6 +498,27 @@ app.post('/add-subtitles', async (req, res) => {
         });
     }
 });
+
+app.post('/burn-edited-subtitles', async (req, res) => {
+    try {
+        const { clipPath, subtitles } = req.body;
+        if (!clipPath || !Array.isArray(subtitles)) {
+            return res.status(400).json({ error: "Missing clipPath or subtitles" });
+        }
+
+        const outputPath = clipPath.replace('.mp4', '-custom-subbed.mp4');
+        await addSubtitlesToClip(clipPath, subtitles, outputPath);
+
+        res.json({
+            success: true,
+            subtitledPath: outputPath
+        });
+    } catch (err) {
+        console.error("🔥 Burn failed:", err);
+        res.status(500).json({ error: "Failed to burn subtitles" });
+    }
+});
+
 
 // Auto-generate clips endpoint (basic clips only)
 app.post('/auto-generate-clips', upload.single('video'), async (req, res) => {
