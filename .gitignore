@@ -15,6 +15,7 @@ dist-ssr
 backend/clips/
 backend/uploads/
 backend/temp/
+backend/venv311
 
 # Editor directories and files
 .vscode/*

@@ -6,6 +6,7 @@ const mysql = require('mysql2');
 const fs = require('fs');
 const cors = require('cors');
 const { OpenAI } = require('openai');
+const { exec } = require('child_process');
 require('dotenv').config();
 
 const app = express();
@@ -13,7 +14,7 @@ const port = 5000;
 
 // Configuration
 const TEST_MODE = false; // Set to false to use real OpenAI API
-const ENABLE_SHORT_FORM = true; // Set to false for normal 16:9 videos
+const ENABLE_SHORT_FORM = false; // Set to false for normal 16:9 videos
 
 app.use(cors());
 app.use(express.json());
@@ -47,6 +48,45 @@ const upload = multer({ storage });
 ['uploads', 'clips', 'temp', 'fonts'].forEach(dir => {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 });
+
+function loadWhisperXWords(jsonPath) {
+    const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+    const words = data.segments.flatMap(segment => segment.words || []);
+    return words.map(w => ({
+        start: w.start,
+        end: w.end,
+        text: w.word.trim()
+    }));
+}
+
+function groupWordsIntoSubtitles(words, groupSize = 3) {
+    const subtitles = [];
+    for (let i = 0; i < words.length; i += groupSize) {
+        const chunk = words.slice(i, i + groupSize);
+        if (chunk.length === 0) continue;
+        subtitles.push({
+            start: chunk[0].start,
+            end: chunk[chunk.length - 1].end,
+            text: chunk.map(w => w.text).join(' ')
+        });
+    }
+    return subtitles;
+}
+
+async function runWhisperX(audioPath, outputDir) {
+    return new Promise((resolve, reject) => {
+        const command = `whisperx "${audioPath}" --output_dir "${outputDir}" --output_format json`;
+        exec(command, (err, stdout, stderr) => {
+            if (err) {
+                console.error("WhisperX failed:", stderr);
+                return reject(err);
+            }
+            console.log("WhisperX output:", stdout);
+            const jsonPath = path.join(outputDir, path.basename(audioPath, path.extname(audioPath)) + '.json');
+            resolve(jsonPath);
+        });
+    });
+}
 
 // Helper function to extract audio for transcription
 function extractAudio(videoPath) {
@@ -389,7 +429,16 @@ app.post('/add-subtitles', async (req, res) => {
         const { clipPath } = req.body;
 
         const audioPath = await extractAudio(clipPath);
-        const subtitles = await getTimedTranscript(audioPath);
+        const outputDir = 'whisperx_output';
+        if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
+
+        console.log("🧠 Running WhisperX on:", audioPath);
+        const jsonPath = await runWhisperX(audioPath, outputDir);
+
+        console.log("📖 Parsing WhisperX output JSON:", jsonPath);
+        const words = loadWhisperXWords(jsonPath);
+        const subtitles = groupWordsIntoSubtitles(words);
+
         fs.unlinkSync(audioPath);
 
         const subbedPath = clipPath.replace('.mp4', '-subbed.mp4');
@@ -400,8 +449,11 @@ app.post('/add-subtitles', async (req, res) => {
             originalPath: clipPath,
             subtitledPath: subbedPath
         });
+
+        console.log(`💬 Subtitles generated: ${subtitles.length} entries`);
+
     } catch (error) {
-        console.error("Failed to add subtitles:", error);
+        console.error("❌ Failed to add subtitles:", error);
         res.status(500).json({
             success: false,
             error: "Failed to add subtitles"
