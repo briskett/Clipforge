@@ -29,6 +29,10 @@ const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY
 });
 
+// ElevenLabs setup
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const elevenlabsUrl = 'https://api.elevenlabs.io/v1/text-to-speech/2EiwWnXFnvU5JabPnv8n';
+
 // Database connection
 const db = mysql.createConnection({
     host: 'localhost',
@@ -436,6 +440,141 @@ app.post('/upload', upload.single('video'), (req, res) => {
     });
 });
 
+app.post('/generate-story', async (req, res) => {
+    const { genre } = req.body;
+    if (!genre) return res.status(400).json({ error: 'Genre is required' });
+
+    try {
+        let story;
+        if (TEST_MODE) {
+            console.log('🧪 TEST MODE: Skipping GPT story generation...');
+            story = 'Test mode enabled – using pre-recorded audio.';
+        } else {
+            console.log('📚 Generating story from GPT...');
+            const storyPrompt = `Write a short story (30 second read) in the style of r/${genre.toLowerCase()}. Make it vivid, emotional, and have a clear beginning, middle, and end.`;
+            const storyResponse = await openai.chat.completions.create({
+                model: 'gpt-4',
+                messages: [{ role: 'user', content: storyPrompt }]
+            });
+            story = storyResponse.choices[0].message.content.trim();
+            console.log('✅ Story generated.');
+        }
+
+        let audioPath;
+        if (TEST_MODE) {
+            console.log('🧪 TEST MODE: Skipping ElevenLabs, using pre-existing MP3...');
+            audioPath = path.join(__dirname, 'temp', 'sample.mp3');
+        } else {
+            console.log('🗣️ Sending to ElevenLabs for TTS...');
+            const ttsResponse = await fetch(elevenlabsUrl, {
+                method: 'POST',
+                headers: {
+                    'xi-api-key': ELEVENLABS_API_KEY,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    text: story,
+                    model_id: "eleven_flash_v2_5",
+                    voice_settings: {
+                        stability: 0.4,
+                        similarity_boost: 0.75
+                    }
+                })
+            });
+
+            if (!ttsResponse.ok) {
+                const errText = await ttsResponse.text();
+                console.error('❌ ElevenLabs TTS error:', errText);
+                throw new Error(`Failed to generate voice: ${errText}`);
+            }
+
+            audioPath = path.join('temp', `story-${Date.now()}.mp3`);
+            const arrayBuffer = await ttsResponse.arrayBuffer();
+            fs.writeFileSync(audioPath, Buffer.from(arrayBuffer));
+        }
+
+
+        // Already handled above with TEST_MODE — removing duplicate block
+
+    const getAudioDuration = (audioPath) => {
+        return new Promise((resolve, reject) => {
+            ffmpeg.ffprobe(audioPath, (err, metadata) => {
+                if (err) return reject(err);
+                resolve(metadata.format.duration);
+            });
+        });
+    };
+    const audioDuration = await getAudioDuration(audioPath);
+    const bufferedDuration = audioDuration + 2;
+
+    const parkourSource = path.join(__dirname, '/parkour/parkour1.mp4');
+    const parkourClip = path.join('temp', `parkour-clip-${Date.now()}.mp4`);
+    const parkourDuration = await getVideoDuration(parkourSource);
+
+    const maxStart = Math.max(0, parkourDuration - bufferedDuration);
+    const randomStart = parseFloat((Math.random() * maxStart).toFixed(2));
+    console.log(`🎯 Trimming video from ${randomStart}s for ${bufferedDuration}s (maxStart: ${maxStart})`);
+    console.log("🎞️ Parkour duration:", parkourDuration);
+    console.log("🔊 Audio + buffer duration:", bufferedDuration);
+
+
+
+        await new Promise((resolve, reject) => {
+        ffmpeg(parkourSource)
+            .setStartTime(randomStart)
+            .setDuration(bufferedDuration)
+            .output(parkourClip)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
+    });
+
+    const outputDir = 'whisperx_output';
+    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
+    const jsonPath = await runWhisperX(audioPath, outputDir);
+    const words = loadWhisperXWords(jsonPath);
+
+    const storyWords = story.split(/\s+/);
+    const matchedWords = words.map((w, i) => ({
+        start: w.start,
+        end: w.end,
+        text: storyWords[i] || ''
+    }));
+
+    const subtitles = groupWordsIntoSubtitles(matchedWords);
+
+    const finalVideo = path.join('clips', `story-${Date.now()}.mp4`);
+    await new Promise((resolve, reject) => {
+        ffmpeg(parkourClip)
+            .input(audioPath)
+            .audioCodec('aac')
+            .videoCodec('libx264')
+            .output(finalVideo)
+            .on('end', resolve)
+            .on('error', reject)
+            .run();
+    });
+
+        const subtitledVideoPath = finalVideo.replace('.mp4', '-subtitled.mp4');
+        await addSubtitlesToClip(finalVideo, subtitles, subtitledVideoPath);
+
+// Overwrite original only if needed
+        fs.unlinkSync(finalVideo);
+        fs.renameSync(subtitledVideoPath, finalVideo);
+
+
+        res.json({
+        success: true,
+        story,
+        videoPath: finalVideo
+    });
+
+} catch (err) {
+    console.error("Failed to generate story:", err);
+    res.status(500).json({ error: 'Failed to generate story', details: err.message || err.toString() });
+}
+});
+
 // Generate basic clip (no subtitles)
 app.post('/generate-clip', upload.single('video'), async (req, res) => {
     try {
@@ -471,6 +610,7 @@ app.post('/add-subtitles', async (req, res) => {
         if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
 
         console.log("🧠 Running WhisperX on:", audioPath);
+        console.log("👉 Command:", command);
         const jsonPath = await runWhisperX(audioPath, outputDir);
 
         console.log("📖 Parsing WhisperX output JSON:", jsonPath);

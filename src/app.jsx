@@ -15,8 +15,42 @@ function App() {
     const [editableSubtitles, setEditableSubtitles] = useState([]);
     const [selectedClipPath, setSelectedClipPath] = useState(null);
     const [currentSubtitleText, setCurrentSubtitleText] = useState('');
+    const [selectedGenre, setSelectedGenre] = useState('');
+    const [generatedStory, setGeneratedStory] = useState('');
+    const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
+
 
     const videoRef = useRef(null);
+
+    const genreOptions = [
+        'Horror',
+        'AITA',
+        'TIFU',
+        'Off My Chest',
+        'Relationship Advice',
+        'Creepy Encounter'
+    ];
+
+    const generateStory = async () => {
+        if (!selectedGenre) {
+            alert('Please select a genre first');
+            return;
+        }
+
+        try {
+            setProgress(`Generating a ${selectedGenre} story...`);
+            const response = await axios.post('http://localhost:5000/generate-story', {
+                genre: selectedGenre
+            });
+            setGeneratedStory(response.data.story);
+            setGeneratedVideoUrl(response.data.videoPath);
+
+            setProgress('Story generated successfully!');
+        } catch (error) {
+            console.error('Error generating story:', error);
+            alert('Story generation failed: ' + (error.response?.data?.details || error.message))
+        }
+    };
 
     const uploadVideo = async () => {
         const formData = new FormData();
@@ -146,6 +180,43 @@ function App() {
     return (
         <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
             <h1>Clipping Software V0.2</h1>
+
+
+            {/* Story Generation Section */}
+            <div style={{ marginBottom: '20px', padding: '20px', border: '1px solid #ddd', borderRadius: '5px' }}>
+                <h2>Generate AI Story</h2>
+                <select
+                    value={selectedGenre}
+                    onChange={(e) => setSelectedGenre(e.target.value)}
+                    style={{ marginRight: '10px' }}
+                >
+                    <option value="">Select Genre</option>
+                    {genreOptions.map((genre,idx) => (
+                        <option key={idx} value={genre}>{genre}</option>
+                    ))}
+                </select>
+                <button onClick={generateStory}>Generate Story</button>
+
+                {generatedStory && (
+                    <div style={{ marginTop: '20px', whitespace: 'pre-wrap' }}>
+                        <h3>{selectedGenre} Story:</h3>
+                        <p>{generatedStory}</p>
+                    </div>
+                )}
+
+                {generatedVideoUrl && (
+                    <div style={{ marginTop: '20px' }}>
+                        <h4>Generated Video:</h4>
+                        <video
+                            controls
+                            src={`http://localhost:5000/${generatedVideoUrl}`}
+                            style={{ width: '100%', maxWidth: '600px' }}
+                        />
+                    </div>
+                )}
+
+
+            </div>
 
             {/* File Upload Section */}
             <div style={{ marginBottom: '20px', padding: '20px', border: '1px solid #ddd', borderRadius: '5px' }}>
