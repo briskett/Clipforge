@@ -365,7 +365,7 @@ async function findHighlights(transcript, videoDuration) {
     }
 
     const prompt = `
-You are a professional video editor specializing in creating viral short-form content. Analyze this transcript and identify the absolute BEST 3-5 clips (30-60 seconds each) that would perform well on platforms like TikTok, Instagram Reels, and YouTube Shorts.
+You are a professional video editor specializing in creating viral short-form content. Analyze this transcript and identify the absolute BEST clips (10-90 seconds each) that would perform well on platforms like TikTok, Instagram Reels, and YouTube Shorts.
 
 ## Selection Criteria (in order of priority):
 1. **Hook Potential** - First 3 seconds must be extremely attention-grabbing
@@ -379,7 +379,7 @@ You are a professional video editor specializing in creating viral short-form co
 5. **Pacing** - Prefer segments with varied vocal energy (not monotone)
 
 ## Technical Requirements:
-- Clip duration MUST be between 30-60 seconds
+- Clip duration MUST be between 10-90 seconds
 - Always include 0.5s buffer before/after the selected segment
 - Never cut mid-sentence
 - Prefer segments where speaker is building to a climax

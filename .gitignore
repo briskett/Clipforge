@@ -16,6 +16,7 @@ backend/clips/
 backend/uploads/
 backend/temp/
 backend/venv311
+backend/parkour
 
 # Editor directories and files
 .vscode/*

@@ -1,6 +1,7 @@
 import React, { useState, useRef  } from 'react';
 import axios from 'axios';
 import SubtitleEditor from './components/SubtitleEditor.jsx';
+import './stylesheets/app.css';
 
 function App() {
     const [file, setFile] = useState(null);
@@ -257,13 +258,18 @@ function App() {
                         {editableSubtitles.length > 0 && selectedClipPath && (
                             <div style={{padding: '20px', borderTop: '2px solid #ccc', marginTop: '30px'}}>
                                 <h3>Editing Subtitles for: {selectedClipPath}</h3>
-                                <div style={{ position: 'relative', width: '100%', maxWidth: '600px', marginBottom: '20px' }}>
+                                <div style={{
+                                    position: 'relative',
+                                    width: '100%',
+                                    maxWidth: '600px',
+                                    marginBottom: '20px'
+                                }}>
                                     <video
                                         ref={videoRef}
                                         src={`http://localhost:5000/${selectedClipPath}`}
                                         onTimeUpdate={handleTimeUpdate}
                                         controls
-                                        style={{ width: '100%' }}
+                                        style={{width: '100%'}}
                                     />
                                     <div
                                         style={{
@@ -271,14 +277,16 @@ function App() {
                                             bottom: '10%',
                                             width: '100%',
                                             textAlign: 'center',
-                                            fontSize: '24px',
-                                            color: 'white',
+                                            fontSize: '42px',
+                                            color: '#ffff00', // bright yellow
+                                            fontFamily: 'Runescape UF Regular, sans-serif',
                                             textShadow: '2px 2px 8px black',
                                             pointerEvents: 'none'
                                         }}
                                     >
                                         {currentSubtitleText}
                                     </div>
+
                                 </div>
 
                                 <SubtitleEditor
