@@ -6,7 +6,7 @@ const mysql = require('mysql2');
 const fs = require('fs');
 const cors = require('cors');
 const { OpenAI } = require('openai');
-const { exec } = require('child_process');
+const { spawn } = require('child_process');
 require('dotenv').config();
 
 const app = express();
@@ -14,7 +14,7 @@ const port = 5000;
 
 // Configuration
 const TEST_MODE = true; // Set to false to use real OpenAI API
-const ENABLE_SHORT_FORM = false; // Set to false for normal 16:9 videos
+const ENABLE_SHORT_FORM = true; // Set to false for normal 16:9 videos
 
 app.use(cors());
 app.use(express.json());
@@ -84,15 +84,30 @@ function groupWordsIntoSubtitles(words, groupSize = 3) {
 
 async function runWhisperX(audioPath, outputDir) {
     return new Promise((resolve, reject) => {
-        const command = `whisperx "${audioPath}" --output_dir "${outputDir}" --output_format json`;
-        exec(command, (err, stdout, stderr) => {
-            if (err) {
-                console.error("WhisperX failed:", stderr);
-                return reject(err);
+        const jsonPath = path.join(outputDir, path.basename(audioPath, path.extname(audioPath)) + '.json');
+
+        const whisper = spawn('whisperx', [
+            audioPath,
+            '--output_dir', outputDir,
+            '--output_format', 'json',
+            '--language', 'en'
+        ]);
+
+        whisper.stdout.on('data', (data) => {
+            console.log(`[WhisperX STDOUT] ${data}`);
+        });
+
+        whisper.stderr.on('data', (data) => {
+            console.error(`[WhisperX STDERR] ${data}`);
+        });
+
+        whisper.on('close', (code) => {
+            if (code === 0) {
+                console.log('✅ WhisperX alignment complete.');
+                resolve(jsonPath);
+            } else {
+                reject(new Error(`WhisperX exited with code ${code}`));
             }
-            console.log("WhisperX output:", stdout);
-            const jsonPath = path.join(outputDir, path.basename(audioPath, path.extname(audioPath)) + '.json');
-            resolve(jsonPath);
         });
     });
 }
@@ -493,9 +508,6 @@ app.post('/generate-story', async (req, res) => {
             fs.writeFileSync(audioPath, Buffer.from(arrayBuffer));
         }
 
-
-        // Already handled above with TEST_MODE — removing duplicate block
-
     const getAudioDuration = (audioPath) => {
         return new Promise((resolve, reject) => {
             ffmpeg.ffprobe(audioPath, (err, metadata) => {
@@ -517,8 +529,6 @@ app.post('/generate-story', async (req, res) => {
     console.log("🎞️ Parkour duration:", parkourDuration);
     console.log("🔊 Audio + buffer duration:", bufferedDuration);
 
-
-
         await new Promise((resolve, reject) => {
         ffmpeg(parkourSource)
             .setStartTime(randomStart)
@@ -534,26 +544,52 @@ app.post('/generate-story', async (req, res) => {
     const jsonPath = await runWhisperX(audioPath, outputDir);
     const words = loadWhisperXWords(jsonPath);
 
-    const storyWords = story.split(/\s+/);
-    const matchedWords = words.map((w, i) => ({
-        start: w.start,
-        end: w.end,
-        text: storyWords[i] || ''
-    }));
 
-    const subtitles = groupWordsIntoSubtitles(matchedWords);
+    let subtitles;
+
+    if (TEST_MODE) {
+        console.log("⚠️ TEST MODE: Using WhisperX word timings directly for subtitles");
+        subtitles = groupWordsIntoSubtitles(words);
+    } else {
+        console.log("🧠 Aligning generated story text to WhisperX timings");
+        const storyWords = story.split(/\s+/);
+        const matchedWords = words.map((w, i) => ({
+            start: w.start,
+            end: w.end,
+            text: storyWords[i] || ''
+        }));
+        subtitles = groupWordsIntoSubtitles(matchedWords);
+    }
 
     const finalVideo = path.join('clips', `story-${Date.now()}.mp4`);
-    await new Promise((resolve, reject) => {
-        ffmpeg(parkourClip)
-            .input(audioPath)
-            .audioCodec('aac')
-            .videoCodec('libx264')
-            .output(finalVideo)
-            .on('end', resolve)
-            .on('error', reject)
-            .run();
-    });
+
+    console.log("🔊 Merging audio from:", audioPath);
+    console.log("🎞️ Merging into video:", parkourClip);
+    console.log("📤 Output path will be:", finalVideo);
+
+        await new Promise((resolve, reject) => {
+            ffmpeg()
+                .input(parkourClip)     // 🎥 Video
+                .input(audioPath)       // 🔊 Audio
+                .videoCodec('libx264')
+                .audioCodec('aac')
+                .outputOptions([
+                    '-map 0:v:0',        // map video stream
+                    '-map 1:a:0',        // map audio stream
+                    '-shortest'          // cut to shortest of video/audio
+                ])
+                .output(finalVideo)
+                .on('start', (cmdLine) => {
+                    console.log("📸 ffmpeg merge command:", cmdLine);
+                })
+                .on('end', resolve)
+                .on('error', (err) => {
+                    console.error("❌ ffmpeg merge error:", err);
+                    reject(err);
+                })
+                .run();
+        });
+
 
         const subtitledVideoPath = finalVideo.replace('.mp4', '-subtitled.mp4');
         await addSubtitlesToClip(finalVideo, subtitles, subtitledVideoPath);
