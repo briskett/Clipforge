@@ -13,7 +13,7 @@ const app = express();
 const port = 5000;
 
 // Configuration
-const TEST_MODE = true; // Set to false to use real OpenAI API
+const TEST_MODE = false; // Set to false to use real OpenAI API
 const ENABLE_SHORT_FORM = true; // Set to false for normal 16:9 videos
 
 app.use(cors());
@@ -30,7 +30,7 @@ const openai = new OpenAI({
 });
 
 // ElevenLabs setup
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY2;
 const elevenlabsUrl = 'https://api.elevenlabs.io/v1/text-to-speech/2EiwWnXFnvU5JabPnv8n';
 
 // Database connection
@@ -466,7 +466,32 @@ app.post('/generate-story', async (req, res) => {
             story = 'Test mode enabled – using pre-recorded audio.';
         } else {
             console.log('📚 Generating story from GPT...');
-            const storyPrompt = `Write a short story (30 second read) in the style of r/${genre.toLowerCase()}. Make it vivid, emotional, and have a clear beginning, middle, and end.`;
+            const storyPrompt = `
+You are a Reddit user writing a story that fits perfectly in r/${genre.toLowerCase()}.
+
+Write the post in the exact tone, formatting, and storytelling style used by real people on that subreddit. 
+It should sound like someone casually sharing their story online — not like a script,
+ a novel, or something trying to be too polished.
+ Keep the language natural and believable. Avoid big, fancy words, weird metaphors,
+  or theatrical phrases that don’t match how people actually talk.
+
+Start with the story’s title right at the beginning — no need to label it as “Title”
+ or put it in brackets. Just start with the title as the first line like a regular Reddit post.
+
+Use proper pacing and flow, like someone typing out a story in one sitting.
+ No weird symbols, no brackets, and nothing that would sound robotic or strange
+  when read out loud by ElevenLabs.
+  Dialogue and inner thoughts should feel realistic — nothing exaggerated
+   or overly dramatic unless it fits the tone of the subreddit.
+
+You can end the story on a cliffhanger if it makes it more engaging or
+ creates a good reason for a follow-up post later. Just make it feel like something
+  that could actually go viral because it’s funny, awkward, dramatic, or super relatable
+   — not because it sounds like it was written by a screenwriter.
+
+Important: Always spell out acronyms like “Am I The Asshole” instead
+ of using short versions. Keep it easy to read and easy to listen to.`;
+
             const storyResponse = await openai.chat.completions.create({
                 model: 'gpt-4',
                 messages: [{ role: 'user', content: storyPrompt }]
@@ -517,7 +542,8 @@ app.post('/generate-story', async (req, res) => {
         });
     };
     const audioDuration = await getAudioDuration(audioPath);
-    const bufferedDuration = audioDuration + 2;
+    const bufferedDuration = audioDuration + 0; // modify buffer duration here, for avoiding abrupt audio
+        // i set it to zero because it messed with subtitles timing.
 
     const parkourSource = path.join(__dirname, '/parkour/parkour1.mp4');
     const parkourClip = path.join('temp', `parkour-clip-${Date.now()}.mp4`);
@@ -530,14 +556,44 @@ app.post('/generate-story', async (req, res) => {
     console.log("🔊 Audio + buffer duration:", bufferedDuration);
 
         await new Promise((resolve, reject) => {
-        ffmpeg(parkourSource)
-            .setStartTime(randomStart)
-            .setDuration(bufferedDuration)
-            .output(parkourClip)
-            .on('end', resolve)
-            .on('error', reject)
-            .run();
-    });
+            const command = ffmpeg(parkourSource)
+                .setStartTime(randomStart)
+                .setDuration(bufferedDuration);
+
+            if (ENABLE_SHORT_FORM) {
+                command
+                    .videoFilters([
+                        {
+                            filter: 'scale',
+                            options: {
+                                w: 1080,
+                                h: 1920,
+                                force_original_aspect_ratio: 'increase'
+                            }
+                        },
+                        {
+                            filter: 'crop',
+                            options: {
+                                w: 1080,
+                                h: 1920
+                            }
+                        }
+                    ])
+                    .outputOptions([
+                        '-movflags +faststart',
+                        '-preset fast',
+                        '-crf 18'
+                    ]);
+            }
+
+            command
+                .output(parkourClip)
+                .on('end', resolve)
+                .on('error', reject)
+                .run();
+        });
+
+        
 
     const outputDir = 'whisperx_output';
     if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
@@ -594,9 +650,63 @@ app.post('/generate-story', async (req, res) => {
         const subtitledVideoPath = finalVideo.replace('.mp4', '-subtitled.mp4');
         await addSubtitlesToClip(finalVideo, subtitles, subtitledVideoPath);
 
-// Overwrite original only if needed
+// Overwrite original with subtitled version
         fs.unlinkSync(finalVideo);
         fs.renameSync(subtitledVideoPath, finalVideo);
+
+// Speed up then repeat replacement
+        const speedUpPath = finalVideo.replace('.mp4', '-spedup.mp4');
+
+        await new Promise((resolve, reject) => {
+            ffmpeg(finalVideo)
+                .videoFilter('setpts=0.7143*PTS') // 1 / 1.4 = ~0.7143 division to set pitch of audio
+                .audioFilter('atempo=1.4')        // audio tempo
+                .outputOptions('-movflags +faststart')
+                .output(speedUpPath)
+                .on('end', resolve)
+                .on('error', reject)
+                .run();
+        });
+
+        fs.unlinkSync(finalVideo); // remove the original
+        fs.renameSync(speedUpPath, finalVideo); // overwrite with sped-up version
+
+
+        const musicDir = path.join(__dirname, 'music', genre.toLowerCase());
+        const musicFiles = fs.readdirSync(musicDir).filter(f => f.endsWith('.mp3'));
+
+        if (musicFiles.length === 0) {
+            throw new Error(`No music files found for genre: ${genre}`);
+        }
+
+        const randomMusicFile = musicFiles[Math.floor(Math.random() * musicFiles.length)];
+        const musicPath = path.join(musicDir, randomMusicFile);
+
+        console.log(`🎵 Adding background music from: ${musicPath}`);
+
+        const withMusicPath = finalVideo.replace('.mp4', '-withmusic.mp4');
+
+        await new Promise((resolve, reject) => {
+            ffmpeg()
+                .input(finalVideo)           // Original sped-up video
+                .input(musicPath)            // Background music
+                .inputOptions('-stream_loop', '-1') // loop music infinitely
+
+                .complexFilter([
+                    '[1:a]volume=0.15[a1]',  // Lower volume of music
+                    '[0:a][a1]amix=inputs=2:duration=shortest' // cuts music to shortest of video/audio
+                ])
+                .audioCodec('aac')
+                .videoCodec('copy')          // Copy video stream
+                .output(withMusicPath)
+                .on('end', resolve)
+                .on('error', reject)
+                .run();
+        });
+
+// Replace final video with version that has music
+        fs.unlinkSync(finalVideo);
+        fs.renameSync(withMusicPath, finalVideo);
 
 
         res.json({

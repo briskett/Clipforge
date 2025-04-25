@@ -23,12 +23,12 @@ function App() {
     const videoRef = useRef(null);
 
     const genreOptions = [
-        'Horror',
+        'confession',
         'AITA',
         'TIFU',
-        'Off My Chest',
-        'Relationship Advice',
-        'Creepy Encounter'
+        'AmIOverreacting',
+        'relationship_advice',
+        'MaliciousCompliance'
     ];
 
     const generateStory = async () => {
