@@ -17,6 +17,7 @@ backend/uploads/
 backend/temp/
 backend/venv311
 backend/parkour
+backend/whisperx_output
 
 # Editor directories and files
 .vscode/*
