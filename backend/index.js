@@ -30,7 +30,7 @@ const openai = new OpenAI({
 });
 
 // ElevenLabs setup
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY2;
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY3;
 const elevenlabsUrl = 'https://api.elevenlabs.io/v1/text-to-speech/2EiwWnXFnvU5JabPnv8n';
 
 // Database connection
@@ -455,7 +455,7 @@ app.post('/upload', upload.single('video'), (req, res) => {
     });
 });
 
-app.post('/generate-story', async (req, res) => {
+app.post('/generate-story-text', async (req, res) => {
     const { genre } = req.body;
     if (!genre) return res.status(400).json({ error: 'Genre is required' });
 
@@ -500,6 +500,24 @@ Important: Always spell out acronyms like “Am I The Asshole” instead
             console.log('✅ Story generated.');
         }
 
+        res.json({
+            success: true,
+            story
+        });
+
+    } catch (err) {
+        console.error("Failed to generate story:", err);
+        res.status(500).json({ error: 'Failed to generate story', details: err.message || err.toString() });
+    }
+});
+
+// The rest of the original `/generate-story` remains, expecting the reviewed story from frontend
+app.post('/finalize-story', async (req, res) => {
+    const { genre, story } = req.body;
+    if (!genre || !story) return res.status(400).json({ error: 'Genre and story are required' });
+
+    try {
+
         let audioPath;
         if (TEST_MODE) {
             console.log('🧪 TEST MODE: Skipping ElevenLabs, using pre-existing MP3...');
@@ -533,27 +551,27 @@ Important: Always spell out acronyms like “Am I The Asshole” instead
             fs.writeFileSync(audioPath, Buffer.from(arrayBuffer));
         }
 
-    const getAudioDuration = (audioPath) => {
-        return new Promise((resolve, reject) => {
-            ffmpeg.ffprobe(audioPath, (err, metadata) => {
-                if (err) return reject(err);
-                resolve(metadata.format.duration);
+        const getAudioDuration = (audioPath) => {
+            return new Promise((resolve, reject) => {
+                ffmpeg.ffprobe(audioPath, (err, metadata) => {
+                    if (err) return reject(err);
+                    resolve(metadata.format.duration);
+                });
             });
-        });
-    };
-    const audioDuration = await getAudioDuration(audioPath);
-    const bufferedDuration = audioDuration + 0; // modify buffer duration here, for avoiding abrupt audio
+        };
+        const audioDuration = await getAudioDuration(audioPath);
+        const bufferedDuration = audioDuration + 0; // modify buffer duration here, for avoiding abrupt audio
         // i set it to zero because it messed with subtitles timing.
 
-    const parkourSource = path.join(__dirname, '/parkour/parkour1.mp4');
-    const parkourClip = path.join('temp', `parkour-clip-${Date.now()}.mp4`);
-    const parkourDuration = await getVideoDuration(parkourSource);
+        const parkourSource = path.join(__dirname, '/parkour/parkour1.mp4');
+        const parkourClip = path.join('temp', `parkour-clip-${Date.now()}.mp4`);
+        const parkourDuration = await getVideoDuration(parkourSource);
 
-    const maxStart = Math.max(0, parkourDuration - bufferedDuration);
-    const randomStart = parseFloat((Math.random() * maxStart).toFixed(2));
-    console.log(`🎯 Trimming video from ${randomStart}s for ${bufferedDuration}s (maxStart: ${maxStart})`);
-    console.log("🎞️ Parkour duration:", parkourDuration);
-    console.log("🔊 Audio + buffer duration:", bufferedDuration);
+        const maxStart = Math.max(0, parkourDuration - bufferedDuration);
+        const randomStart = parseFloat((Math.random() * maxStart).toFixed(2));
+        console.log(`🎯 Trimming video from ${randomStart}s for ${bufferedDuration}s (maxStart: ${maxStart})`);
+        console.log("🎞️ Parkour duration:", parkourDuration);
+        console.log("🔊 Audio + buffer duration:", bufferedDuration);
 
         await new Promise((resolve, reject) => {
             const command = ffmpeg(parkourSource)
@@ -593,35 +611,35 @@ Important: Always spell out acronyms like “Am I The Asshole” instead
                 .run();
         });
 
-        
-
-    const outputDir = 'whisperx_output';
-    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
-    const jsonPath = await runWhisperX(audioPath, outputDir);
-    const words = loadWhisperXWords(jsonPath);
 
 
-    let subtitles;
+        const outputDir = 'whisperx_output';
+        if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
+        const jsonPath = await runWhisperX(audioPath, outputDir);
+        const words = loadWhisperXWords(jsonPath);
 
-    if (TEST_MODE) {
-        console.log("⚠️ TEST MODE: Using WhisperX word timings directly for subtitles");
-        subtitles = groupWordsIntoSubtitles(words);
-    } else {
-        console.log("🧠 Aligning generated story text to WhisperX timings");
-        const storyWords = story.split(/\s+/);
-        const matchedWords = words.map((w, i) => ({
-            start: w.start,
-            end: w.end,
-            text: storyWords[i] || ''
-        }));
-        subtitles = groupWordsIntoSubtitles(matchedWords);
-    }
 
-    const finalVideo = path.join('clips', `story-${Date.now()}.mp4`);
+        let subtitles;
 
-    console.log("🔊 Merging audio from:", audioPath);
-    console.log("🎞️ Merging into video:", parkourClip);
-    console.log("📤 Output path will be:", finalVideo);
+        if (TEST_MODE) {
+            console.log("⚠️ TEST MODE: Using WhisperX word timings directly for subtitles");
+            subtitles = groupWordsIntoSubtitles(words);
+        } else {
+            console.log("🧠 Aligning generated story text to WhisperX timings");
+            const storyWords = story.split(/\s+/);
+            const matchedWords = words.map((w, i) => ({
+                start: w.start,
+                end: w.end,
+                text: storyWords[i] || ''
+            }));
+            subtitles = groupWordsIntoSubtitles(matchedWords);
+        }
+
+        const finalVideo = path.join('clips', `story-${Date.now()}.mp4`);
+
+        console.log("🔊 Merging audio from:", audioPath);
+        console.log("🎞️ Merging into video:", parkourClip);
+        console.log("📤 Output path will be:", finalVideo);
 
         await new Promise((resolve, reject) => {
             ffmpeg()
@@ -710,16 +728,18 @@ Important: Always spell out acronyms like “Am I The Asshole” instead
 
 
         res.json({
-        success: true,
-        story,
-        videoPath: finalVideo
-    });
+            success: true,
+            story,
+            videoPath: finalVideo
+        });
 
-} catch (err) {
-    console.error("Failed to generate story:", err);
-    res.status(500).json({ error: 'Failed to generate story', details: err.message || err.toString() });
-}
+    } catch (err) {
+        console.error("Failed to finalize story:", err);
+        res.status(500).json({ error: 'Failed to finalize story', details: err.message || err.toString() });
+    }
 });
+
+
 
 // Generate basic clip (no subtitles)
 app.post('/generate-clip', upload.single('video'), async (req, res) => {

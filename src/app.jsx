@@ -39,11 +39,11 @@ function App() {
 
         try {
             setProgress(`Generating a ${selectedGenre} story...`);
-            const response = await axios.post('http://localhost:5000/generate-story', {
+            const response = await axios.post('http://localhost:5000/generate-story-text', {
                 genre: selectedGenre
             });
             setGeneratedStory(response.data.story);
-            setGeneratedVideoUrl(response.data.videoPath);
+            //setGeneratedVideoUrl(response.data.videoPath);
 
             setProgress('Story generated successfully!');
         } catch (error) {
@@ -203,6 +203,38 @@ function App() {
                         <p>{generatedStory}</p>
                     </div>
                 )}
+
+                {generatedStory && (
+                    <div style={{ marginTop: '20px' }}>
+                        <h3>Edit Story:</h3>
+                        <textarea
+                            value={generatedStory}
+                            onChange={(e) => setGeneratedStory(e.target.value)}
+                            rows={10}
+                            style={{ width: '100%', whiteSpace: 'pre-wrap' }}
+                        />
+                        <button
+                            style={{ marginTop: '10px' }}
+                            onClick={async () => {
+                                try {
+                                    setProgress('Finalizing story...');
+                                    const response = await axios.post('http://localhost:5000/finalize-story', {
+                                        genre: selectedGenre,
+                                        story: generatedStory
+                                    });
+                                    setGeneratedVideoUrl(response.data.videoPath);
+                                    setProgress('Video generated successfully!');
+                                } catch (err) {
+                                    console.error('Finalize error:', err);
+                                    alert('Failed to finalize story.');
+                                }
+                            }}
+                        >
+                            Finalize and Generate Video
+                        </button>
+                    </div>
+                )}
+
 
                 {generatedVideoUrl && (
                     <div style={{ marginTop: '20px' }}>
