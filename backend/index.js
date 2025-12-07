@@ -31,7 +31,19 @@ const openai = new OpenAI({
 
 // ElevenLabs setup
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY3;
-const elevenlabsUrl = 'https://api.elevenlabs.io/v1/text-to-speech/2EiwWnXFnvU5JabPnv8n';
+const DEFAULT_VOICE_ID = '2EiwWnXFnvU5JabPnv8n';
+
+// Available voice models
+const VOICE_MODELS = {
+    '2EiwWnXFnvU5JabPnv8n': { name: 'Clyde', description: 'Deep, authoritative male voice' },
+    'EXAVITQu4vr4xnSDxMaL': { name: 'Sarah', description: 'Warm, friendly female voice' },
+    'TX3LPaxmHKxFdv7VOQHJ': { name: 'Liam', description: 'Young, energetic male voice' },
+    'XB0fDUnXU5powFXDhCwa': { name: 'Charlotte', description: 'Elegant British female voice' },
+    'pFZP5JQG7iQjIQuC4Bku': { name: 'Lily', description: 'Soft, expressive female voice' },
+    'onwK4e9ZLuTAKqWW03F9': { name: 'Daniel', description: 'Calm, narrative male voice' },
+};
+
+const getElevenLabsUrl = (voiceId) => `https://api.elevenlabs.io/v1/text-to-speech/${voiceId || DEFAULT_VOICE_ID}`;
 
 // Database connection
 const db = mysql.createConnection({
@@ -511,10 +523,95 @@ Important: Always spell out acronyms like “Am I The Asshole” instead
     }
 });
 
+// Get available voice models
+app.get('/voices', (req, res) => {
+    const voices = Object.entries(VOICE_MODELS).map(([id, info]) => ({
+        id,
+        ...info
+    }));
+    res.json({ success: true, voices });
+});
+
+// Voice preview - generates or serves cached preview audio
+const PREVIEW_TEXT = "Hey there! This is what I sound like. I can narrate your Reddit stories with emotion and clarity.";
+const voicePreviewsDir = path.join(__dirname, 'voice_previews');
+
+// Create voice previews directory
+if (!fs.existsSync(voicePreviewsDir)) fs.mkdirSync(voicePreviewsDir);
+
+// Serve voice previews statically
+app.use('/voice_previews', express.static(voicePreviewsDir));
+
+app.get('/preview-voice/:voiceId', async (req, res) => {
+    const { voiceId } = req.params;
+    
+    // Validate voice ID
+    if (!VOICE_MODELS[voiceId]) {
+        return res.status(400).json({ error: 'Invalid voice ID' });
+    }
+    
+    const previewPath = path.join(voicePreviewsDir, `${voiceId}.mp3`);
+    
+    // Check if preview already exists (cached)
+    if (fs.existsSync(previewPath)) {
+        console.log(`🎵 Serving cached preview for ${VOICE_MODELS[voiceId].name}`);
+        return res.json({ 
+            success: true, 
+            previewUrl: `/voice_previews/${voiceId}.mp3`,
+            cached: true
+        });
+    }
+    
+    // Generate new preview
+    try {
+        console.log(`🎙️ Generating voice preview for ${VOICE_MODELS[voiceId].name}...`);
+        
+        const ttsResponse = await fetch(getElevenLabsUrl(voiceId), {
+            method: 'POST',
+            headers: {
+                'xi-api-key': ELEVENLABS_API_KEY,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                text: PREVIEW_TEXT,
+                model_id: "eleven_flash_v2_5",
+                voice_settings: {
+                    stability: 0.4,
+                    similarity_boost: 0.75
+                }
+            })
+        });
+        
+        if (!ttsResponse.ok) {
+            const errText = await ttsResponse.text();
+            console.error('❌ ElevenLabs preview error:', errText);
+            throw new Error(`Failed to generate preview: ${errText}`);
+        }
+        
+        const arrayBuffer = await ttsResponse.arrayBuffer();
+        fs.writeFileSync(previewPath, Buffer.from(arrayBuffer));
+        
+        console.log(`✅ Preview generated and cached for ${VOICE_MODELS[voiceId].name}`);
+        
+        res.json({ 
+            success: true, 
+            previewUrl: `/voice_previews/${voiceId}.mp3`,
+            cached: false
+        });
+        
+    } catch (error) {
+        console.error('❌ Failed to generate voice preview:', error);
+        res.status(500).json({ error: 'Failed to generate voice preview' });
+    }
+});
+
 // The rest of the original `/generate-story` remains, expecting the reviewed story from frontend
 app.post('/finalize-story', async (req, res) => {
-    const { genre, story } = req.body;
+    const { genre, story, voiceId, backgroundType } = req.body;
     if (!genre || !story) return res.status(400).json({ error: 'Genre and story are required' });
+
+    const selectedVoiceId = voiceId || DEFAULT_VOICE_ID;
+    console.log(`🎙️ Using voice: ${VOICE_MODELS[selectedVoiceId]?.name || 'Unknown'} (${selectedVoiceId})`);
 
     try {
 
@@ -524,7 +621,7 @@ app.post('/finalize-story', async (req, res) => {
             audioPath = path.join(__dirname, 'temp', 'sample.mp3');
         } else {
             console.log('🗣️ Sending to ElevenLabs for TTS...');
-            const ttsResponse = await fetch(elevenlabsUrl, {
+            const ttsResponse = await fetch(getElevenLabsUrl(selectedVoiceId), {
                 method: 'POST',
                 headers: {
                     'xi-api-key': ELEVENLABS_API_KEY,
@@ -563,7 +660,7 @@ app.post('/finalize-story', async (req, res) => {
         const bufferedDuration = audioDuration + 0; // modify buffer duration here, for avoiding abrupt audio
         // i set it to zero because it messed with subtitles timing.
 
-        const parkourSource = path.join(__dirname, '/parkour/parkour1.mp4');
+        const parkourSource = path.join(__dirname, '/background/parkour1.mp4');
         const parkourClip = path.join('temp', `parkour-clip-${Date.now()}.mp4`);
         const parkourDuration = await getVideoDuration(parkourSource);
 

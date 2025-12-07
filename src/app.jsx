@@ -1,345 +1,517 @@
-import React, { useState, useRef  } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import SubtitleEditor from './components/SubtitleEditor.jsx';
-import StoryGenerator from './components/StoryGenerator.jsx';
 import './stylesheets/app.css';
 
+const STEPS = [
+    { id: 1, title: 'Choose Subreddit', icon: '📖' },
+    { id: 2, title: 'Select Background', icon: '🎬' },
+    { id: 3, title: 'Pick Voice', icon: '🎙️' },
+    { id: 4, title: 'Review Story', icon: '✏️' },
+    { id: 5, title: 'Generate Video', icon: '🚀' },
+];
+
+const SUBREDDITS = [
+    { id: 'AITA', name: 'Am I The Asshole', description: 'Moral dilemmas and judgment calls', color: '#FF4500' },
+    { id: 'TIFU', name: 'Today I F***ed Up', description: 'Embarrassing mistakes and regrets', color: '#FF6B35' },
+    { id: 'MaliciousCompliance', name: 'Malicious Compliance', description: 'Following rules to absurd ends', color: '#7B68EE' },
+    { id: 'AmIOverreacting', name: 'Am I Overreacting', description: 'Validating emotional responses', color: '#20B2AA' },
+    { id: 'relationship_advice', name: 'Relationship Advice', description: 'Love, drama, and heartbreak', color: '#FF69B4' },
+    { id: 'confession', name: 'Confessions', description: 'Deep secrets revealed', color: '#8B0000' },
+];
+
+const BACKGROUNDS = [
+    { id: 'minecraft', name: 'Minecraft Parkour', description: 'Classic viral background', preview: '🎮', isDefault: true },
+    { id: 'custom', name: 'Upload Your Own', description: 'Use your own video', preview: '📁', isDefault: false },
+];
+
+const VOICES = [
+    { id: '2EiwWnXFnvU5JabPnv8n', name: 'Clyde', description: 'Deep, authoritative male voice', gender: 'male' },
+    { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah', description: 'Warm, friendly female voice', gender: 'female' },
+    { id: 'TX3LPaxmHKxFdv7VOQHJ', name: 'Liam', description: 'Young, energetic male voice', gender: 'male' },
+    { id: 'XB0fDUnXU5powFXDhCwa', name: 'Charlotte', description: 'Elegant British female voice', gender: 'female' },
+    { id: 'pFZP5JQG7iQjIQuC4Bku', name: 'Lily', description: 'Soft, expressive female voice', gender: 'female' },
+    { id: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel', description: 'Calm, narrative male voice', gender: 'male' },
+];
+
 function App() {
-    const [file, setFile] = useState(null);
-    const [videoId, setVideoId] = useState(null);
-    const [startTime, setStartTime] = useState(0);
-    const [endTime, setEndTime] = useState(10);
-    const [clipUrl, setClipUrl] = useState('');
-    const [autoClips, setAutoClips] = useState([]);
-    const [isProcessing, setIsProcessing] = useState(false);
-    const [progress, setProgress] = useState('');
-    const [editableSubtitles, setEditableSubtitles] = useState([]);
-    const [selectedClipPath, setSelectedClipPath] = useState(null);
-    const [currentSubtitleText, setCurrentSubtitleText] = useState('');
-    const [selectedGenre, setSelectedGenre] = useState('');
+    const [currentStep, setCurrentStep] = useState(1);
+    const [selectedSubreddit, setSelectedSubreddit] = useState(null);
+    const [selectedBackground, setSelectedBackground] = useState('minecraft');
+    const [customBackgroundFile, setCustomBackgroundFile] = useState(null);
+    const [selectedVoice, setSelectedVoice] = useState(VOICES[0].id);
     const [generatedStory, setGeneratedStory] = useState('');
+    const [isGeneratingStory, setIsGeneratingStory] = useState(false);
+    const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
     const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
+    const [progress, setProgress] = useState('');
+    
+    // Voice preview state
+    const [playingVoice, setPlayingVoice] = useState(null);
+    const [loadingVoice, setLoadingVoice] = useState(null);
+    const audioRef = useRef(null);
 
-
-    const videoRef = useRef(null);
-
-
-    const uploadVideo = async () => {
-        const formData = new FormData();
-        formData.append('video', file);
-
-        try {
-            const response = await axios.post('http://localhost:5000/upload', formData, {
-                headers: { 'Content-Type': 'multipart/form-data' }
-            });
-            setVideoId(response.data.videoId);
-            alert('Video uploaded successfully');
-        } catch (error) {
-            console.error('Error uploading video:', error);
-            alert('Upload failed: ' + error.message);
+    // Stop audio when leaving voice selection step
+    useEffect(() => {
+        if (currentStep !== 3 && audioRef.current) {
+            audioRef.current.pause();
+            audioRef.current = null;
+            setPlayingVoice(null);
         }
-    };
+    }, [currentStep]);
 
-    const generateClip = async () => {
-        if (!file) {
-            alert('Please upload a video first');
+    const playVoicePreview = async (voiceId, e) => {
+        e.stopPropagation(); // Prevent card selection when clicking play
+        
+        // If same voice is playing, stop it
+        if (playingVoice === voiceId) {
+            audioRef.current?.pause();
+            setPlayingVoice(null);
             return;
         }
-
-        const formData = new FormData();
-        formData.append('video', file);
-        formData.append('startTime', startTime);
-        formData.append('endTime', endTime);
-
+        
+        // Stop any currently playing audio
+        if (audioRef.current) {
+            audioRef.current.pause();
+        }
+        
+        setLoadingVoice(voiceId);
+        
         try {
-            const response = await axios.post('http://localhost:5000/generate-clip', formData, {
-                headers: { 'Content-Type': 'multipart/form-data' }
-            });
-            setClipUrl(response.data.clipPath);
+            // Fetch preview URL from backend
+            const response = await axios.get(`http://localhost:5000/preview-voice/${voiceId}`);
+            const previewUrl = `http://localhost:5000${response.data.previewUrl}`;
+            
+            // Create and play audio
+            const audio = new Audio(previewUrl);
+            audioRef.current = audio;
+            
+            audio.onended = () => {
+                setPlayingVoice(null);
+            };
+            
+            audio.onerror = () => {
+                setPlayingVoice(null);
+                setLoadingVoice(null);
+                alert('Failed to load voice preview');
+            };
+            
+            await audio.play();
+            setPlayingVoice(voiceId);
+            
         } catch (error) {
-            console.error('Error generating clip:', error);
-            alert('Clip generation failed: ' + error.message);
+            console.error('Error playing voice preview:', error);
+            alert('Failed to load voice preview. Please try again.');
+        } finally {
+            setLoadingVoice(null);
         }
     };
 
-    const fetchSubtitles = async (clipPath) => {
-        try {
-            const response = await axios.post('http://localhost:5000/generate-subtitles-json', {
-                clipPath
-            });
-            setEditableSubtitles(response.data.subtitles);
-            setSelectedClipPath(clipPath);
-            setProgress('Subtitles loaded for editing!');
-        } catch (error) {
-            console.error('Failed to fetch subtitles:', error);
-            alert('Failed to load subtitles: ' + error.message);
+    const canProceed = () => {
+        switch (currentStep) {
+            case 1: return selectedSubreddit !== null;
+            case 2: return selectedBackground === 'minecraft' || customBackgroundFile !== null;
+            case 3: return selectedVoice !== null;
+            case 4: return generatedStory.trim().length > 0;
+            case 5: return true;
+            default: return false;
         }
     };
 
-
-    const generateAutoClips = async () => {
-        if (!file) {
-            alert('Please select a video file first');
-            return;
+    const handleNext = async () => {
+        if (currentStep === 3 && !generatedStory) {
+            // Generate story when moving to step 4
+            await generateStory();
         }
+        if (currentStep < 5) {
+            setCurrentStep(currentStep + 1);
+        }
+    };
 
-        setIsProcessing(true);
-        setProgress('Uploading video...');
+    const handleBack = () => {
+        if (currentStep > 1) {
+            setCurrentStep(currentStep - 1);
+        }
+    };
 
+    const generateStory = async () => {
+        setIsGeneratingStory(true);
+        setProgress('Crafting your story with AI...');
+        try {
+            const response = await axios.post('http://localhost:5000/generate-story-text', {
+                genre: selectedSubreddit
+            });
+            setGeneratedStory(response.data.story);
+            setProgress('');
+        } catch (error) {
+            console.error('Error generating story:', error);
+            alert('Failed to generate story. Please try again.');
+        } finally {
+            setIsGeneratingStory(false);
+        }
+    };
+
+    const generateVideo = async () => {
+        setIsGeneratingVideo(true);
+        setProgress('Creating your video...');
+        
         try {
             const formData = new FormData();
-            formData.append('video', file);
+            formData.append('genre', selectedSubreddit);
+            formData.append('story', generatedStory);
+            formData.append('voiceId', selectedVoice);
+            
+            if (selectedBackground === 'custom' && customBackgroundFile) {
+                formData.append('customBackground', customBackgroundFile);
+            }
 
-            setProgress('Analyzing content with AI...');
-            const response = await axios.post(
-                'http://localhost:5000/auto-generate-clips',
-                formData,
-                {
-                    headers: { 'Content-Type': 'multipart/form-data' },
-                    onUploadProgress: (progressEvent) => {
-                        const percentCompleted = Math.round(
-                            (progressEvent.loaded * 100) / progressEvent.total
-                        );
-                        setProgress(`Uploading: ${percentCompleted}%`);
-                    }
-                }
-            );
-
-            setProgress('Generating clips...');
-            setAutoClips(response.data.clips);
-            setVideoId(response.data.videoId);
-            setProgress('Done!');
-        } catch (error) {
-            console.error('Error generating auto clips:', error);
-            alert('Auto clip generation failed: ' + error.message);
-        } finally {
-            setIsProcessing(false);
-        }
-    };
-
-    const addSubtitlesToClip = async (clipPath) => {
-        try {
-            setProgress('Adding subtitles...');
-            const response = await axios.post('http://localhost:5000/add-subtitles', {
-                clipPath: clipPath
+            const response = await axios.post('http://localhost:5000/finalize-story', {
+                genre: selectedSubreddit,
+                story: generatedStory,
+                voiceId: selectedVoice,
+                backgroundType: selectedBackground
             });
 
-            // Update the clip in state with the subtitled version
-            setAutoClips(prevClips =>
-                prevClips.map(clip =>
-                    clip.path === clipPath
-                        ? { ...clip, subtitledPath: response.data.subtitledPath }
-                        : clip
-                )
-            );
-            setProgress('Subtitles added successfully!');
+            setGeneratedVideoUrl(response.data.videoPath);
+            setProgress('');
         } catch (error) {
-            console.error('Error adding subtitles:', error);
-            alert('Failed to add subtitles: ' + error.message);
+            console.error('Error generating video:', error);
+            alert('Failed to generate video. Please try again.');
+        } finally {
+            setIsGeneratingVideo(false);
         }
     };
 
-    const handleTimeUpdate = () => {
-        const currentTime = videoRef.current?.currentTime || 0;
-
-        const match = editableSubtitles.find(
-            sub => currentTime >= sub.start && currentTime <= sub.end
-        );
-
-        setCurrentSubtitleText(match ? match.text : '');
+    const resetWizard = () => {
+        setCurrentStep(1);
+        setSelectedSubreddit(null);
+        setSelectedBackground('minecraft');
+        setCustomBackgroundFile(null);
+        setSelectedVoice(VOICES[0].id);
+        setGeneratedStory('');
+        setGeneratedVideoUrl('');
+        setProgress('');
     };
 
     return (
-        <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
-            <h1>Clipping Software V0.2</h1>
+        <div className="app-container">
+            <div className="wizard-wrapper">
+                {/* Header */}
+                <header className="wizard-header">
+                    <h1 className="logo">
+                        <span className="logo-icon">🎬</span>
+                        ClipForge
+                    </h1>
+                    <p className="tagline">Create viral Reddit story videos in minutes</p>
+                </header>
 
-            <StoryGenerator
-                selectedGenre={selectedGenre}
-                setSelectedGenre={setSelectedGenre}
-                generatedStory={generatedStory}
-                setGeneratedStory={setGeneratedStory}
-                setProgress={setProgress}
-                setGeneratedVideoUrl={setGeneratedVideoUrl}
-                generatedVideoUrl={generatedVideoUrl}
-            />
-
-            {/* File Upload Section */}
-            <div style={{ marginBottom: '20px', padding: '20px', border: '1px solid #ddd', borderRadius: '5px' }}>
-                <h2>Upload Video</h2>
-                <input
-                    type="file"
-                    onChange={(e) => setFile(e.target.files[0])}
-                    accept="video/*"
-                    style={{ marginBottom: '10px' }}
-                />
-                <div>
-                    <button onClick={uploadVideo} style={{ marginRight: '10px' }}>
-                        Upload Video
-                    </button>
-                    <button onClick={generateAutoClips} disabled={isProcessing}>
-                        {isProcessing ? 'Processing...' : 'Auto-Generate Highlights'}
-                    </button>
+                {/* Progress Steps */}
+                <div className="steps-container">
+                    {STEPS.map((step, index) => (
+                        <div 
+                            key={step.id}
+                            className={`step-item ${currentStep === step.id ? 'active' : ''} ${currentStep > step.id ? 'completed' : ''}`}
+                        >
+                            <div className="step-circle">
+                                {currentStep > step.id ? '✓' : step.icon}
+                            </div>
+                            <span className="step-title">{step.title}</span>
+                            {index < STEPS.length - 1 && <div className="step-connector" />}
+                        </div>
+                    ))}
                 </div>
-                {isProcessing && <p>{progress}</p>}
-            </div>
 
-            {/* Manual Clip Generation */}
-            <div style={{ marginBottom: '20px', padding: '20px', border: '1px solid #ddd', borderRadius: '5px' }}>
-                <h2>Manual Clip Generation</h2>
-                <div style={{ marginBottom: '10px' }}>
-                    <label style={{ marginRight: '10px' }}>
-                        Start Time (seconds):
-                        <input
-                            type="number"
-                            value={startTime}
-                            onChange={(e) => setStartTime(Number(e.target.value))}
-                            style={{ marginLeft: '5px' }}
-                        />
-                    </label>
-                    <label>
-                        End Time (seconds):
-                        <input
-                            type="number"
-                            value={endTime}
-                            onChange={(e) => setEndTime(Number(e.target.value))}
-                            style={{ marginLeft: '5px' }}
-                        />
-                    </label>
-                </div>
-                <button onClick={generateClip} disabled={!file}>
-                    Generate Manual Clip
-                </button>
-            </div>
+                {/* Step Content */}
+                <div className="step-content">
+                    {/* Step 1: Choose Subreddit */}
+                    {currentStep === 1 && (
+                        <div className="step-panel fade-in">
+                            <h2>What kind of story do you want?</h2>
+                            <p className="step-description">Choose a subreddit style for your AI-generated story</p>
+                            
+                            <div className="subreddit-grid">
+                                {SUBREDDITS.map((sub) => (
+                                    <div
+                                        key={sub.id}
+                                        className={`subreddit-card ${selectedSubreddit === sub.id ? 'selected' : ''}`}
+                                        onClick={() => setSelectedSubreddit(sub.id)}
+                                        style={{ '--accent-color': sub.color }}
+                                    >
+                                        <div className="subreddit-header">
+                                            <span className="subreddit-icon">r/</span>
+                                            <span className="subreddit-name">{sub.id}</span>
+                                        </div>
+                                        <h3>{sub.name}</h3>
+                                        <p>{sub.description}</p>
+                                        {selectedSubreddit === sub.id && (
+                                            <div className="selected-badge">✓ Selected</div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
 
-            {/* Results Section */}
-            <div>
-                {/* Manual Clip Result */}
-                {clipUrl && (
-                    <div style={{ marginBottom: '20px' }}>
-                        <h3>Generated Clip</h3>
-                        <video
-                            src={`http://localhost:5000/${clipUrl}`}
-                            controls
-                            style={{ width: '100%', maxWidth: '600px' }}
-                        />
-                    </div>
-                )}
+                    {/* Step 2: Select Background */}
+                    {currentStep === 2 && (
+                        <div className="step-panel fade-in">
+                            <h2>Choose your background video</h2>
+                            <p className="step-description">This plays behind your story narration</p>
+                            
+                            <div className="background-grid">
+                                {BACKGROUNDS.map((bg) => (
+                                    <div
+                                        key={bg.id}
+                                        className={`background-card ${selectedBackground === bg.id ? 'selected' : ''}`}
+                                        onClick={() => setSelectedBackground(bg.id)}
+                                    >
+                                        <div className="background-preview">{bg.preview}</div>
+                                        <h3>{bg.name}</h3>
+                                        <p>{bg.description}</p>
+                                        {bg.isDefault && <span className="recommended-badge">Recommended</span>}
+                                        {selectedBackground === bg.id && (
+                                            <div className="selected-badge">✓ Selected</div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
 
-                {/* Auto-Generated Clips */}
-                {autoClips.length > 0 && (
-                    <div>
-                        <h2>AI-Generated Highlights</h2>
-                        {autoClips.map((clip, index) => (
-                            <div key={index} style={{ marginBottom: '20px', padding: '15px', border: '1px solid #eee' }}>
-                                <h4>Highlight #{index + 1}</h4>
-                                <p><strong>Reason:</strong> {clip.reason}</p>
-                                <p><strong>Segment:</strong> {clip.start.toFixed(1)}s - {clip.end.toFixed(1)}s</p>
+                            {selectedBackground === 'custom' && (
+                                <div className="custom-upload-section">
+                                    <label className="file-upload-label">
+                                        <input
+                                            type="file"
+                                            accept="video/*"
+                                            onChange={(e) => setCustomBackgroundFile(e.target.files[0])}
+                                            className="file-input"
+                                        />
+                                        <div className="file-upload-box">
+                                            {customBackgroundFile ? (
+                                                <>
+                                                    <span className="file-icon">✅</span>
+                                                    <span>{customBackgroundFile.name}</span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <span className="file-icon">📤</span>
+                                                    <span>Click to upload video</span>
+                                                </>
+                                            )}
+                                        </div>
+                                    </label>
+                                </div>
+                            )}
+                        </div>
+                    )}
 
-                                <video
-                                    src={`http://localhost:5000/${clip.path}`}
-                                    controls
-                                    style={{ width: '100%', maxWidth: '600px', marginBottom: '10px' }}
-                                />
-
-                                {!clip.subtitledPath && (
-                                    <>
-                                        <button
-                                            onClick={() => fetchSubtitles(clip.path)}
-                                            style={{ marginRight: '10px' }}
+                    {/* Step 3: Pick Voice */}
+                    {currentStep === 3 && (
+                        <div className="step-panel fade-in">
+                            <h2>Select a narrator voice</h2>
+                            <p className="step-description">Powered by ElevenLabs AI voices — click the play button to preview</p>
+                            
+                            <div className="voice-grid">
+                                {VOICES.map((voice) => (
+                                    <div
+                                        key={voice.id}
+                                        className={`voice-card ${selectedVoice === voice.id ? 'selected' : ''}`}
+                                        onClick={() => setSelectedVoice(voice.id)}
+                                    >
+                                        <div className="voice-avatar">
+                                            {voice.gender === 'male' ? '👨' : '👩'}
+                                        </div>
+                                        <h3>{voice.name}</h3>
+                                        <p>{voice.description}</p>
+                                        
+                                        <button 
+                                            className={`voice-preview-btn ${playingVoice === voice.id ? 'playing' : ''}`}
+                                            onClick={(e) => playVoicePreview(voice.id, e)}
+                                            disabled={loadingVoice !== null && loadingVoice !== voice.id}
                                         >
-                                            Edit Subtitles
+                                            {loadingVoice === voice.id ? (
+                                                <span className="btn-spinner"></span>
+                                            ) : playingVoice === voice.id ? (
+                                                <>⏹ Stop</>
+                                            ) : (
+                                                <>▶ Preview</>
+                                            )}
                                         </button>
-                                        <button
-                                            onClick={() => addSubtitlesToClip(clip.path)}
+                                        
+                                        {selectedVoice === voice.id && (
+                                            <div className="selected-badge">✓ Selected</div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Step 4: Review Story */}
+                    {currentStep === 4 && (
+                        <div className="step-panel fade-in">
+                            <h2>Review & Edit Your Story</h2>
+                            <p className="step-description">Make sure everything reads exactly how you want it spoken</p>
+                            
+                            {isGeneratingStory ? (
+                                <div className="loading-state">
+                                    <div className="spinner"></div>
+                                    <p>{progress}</p>
+                                </div>
+                            ) : (
+                                <>
+                                    <div className="warning-banner">
+                                        <span className="warning-icon">⚠️</span>
+                                        <div>
+                                            <strong>Important:</strong> ElevenLabs will read text exactly as written. 
+                                            Spell out abbreviations (e.g., "Am I The Asshole" instead of "AITA"). 
+                                            Avoid unusual brackets or punctuation as WhisperX captions will display them.
+                                        </div>
+                                    </div>
+                                    
+                                    <textarea
+                                        className="story-editor"
+                                        value={generatedStory}
+                                        onChange={(e) => setGeneratedStory(e.target.value)}
+                                        placeholder="Your AI-generated story will appear here..."
+                                        rows={15}
+                                    />
+                                    
+                                    <div className="story-actions">
+                                        <button 
+                                            className="btn-secondary"
+                                            onClick={generateStory}
+                                            disabled={isGeneratingStory}
                                         >
-                                            Auto-Burn Subtitles
+                                            🔄 Regenerate Story
                                         </button>
-                                    </>
-                                )}
+                                        <span className="char-count">
+                                            {generatedStory.length} characters
+                                        </span>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    )}
 
+                    {/* Step 5: Generate Video */}
+                    {currentStep === 5 && (
+                        <div className="step-panel fade-in">
+                            <h2>Generate Your Video</h2>
+                            
+                            {!generatedVideoUrl && !isGeneratingVideo && (
+                                <>
+                                    <p className="step-description">Review your selections before generating</p>
+                                    
+                                    <div className="summary-card">
+                                        <div className="summary-item">
+                                            <span className="summary-label">Subreddit Style</span>
+                                            <span className="summary-value">r/{selectedSubreddit}</span>
+                                        </div>
+                                        <div className="summary-item">
+                                            <span className="summary-label">Background</span>
+                                            <span className="summary-value">
+                                                {selectedBackground === 'minecraft' ? 'Minecraft Parkour' : customBackgroundFile?.name}
+                                            </span>
+                                        </div>
+                                        <div className="summary-item">
+                                            <span className="summary-label">Voice</span>
+                                            <span className="summary-value">
+                                                {VOICES.find(v => v.id === selectedVoice)?.name}
+                                            </span>
+                                        </div>
+                                        <div className="summary-item">
+                                            <span className="summary-label">Story Length</span>
+                                            <span className="summary-value">{generatedStory.length} characters</span>
+                                        </div>
+                                    </div>
 
-                                {clip.subtitledPath && (
-                                    <div>
-                                        <h5>With Subtitles:</h5>
+                                    <button 
+                                        className="btn-generate"
+                                        onClick={generateVideo}
+                                    >
+                                        🚀 Generate Video
+                                    </button>
+                                </>
+                            )}
+
+                            {isGeneratingVideo && (
+                                <div className="loading-state">
+                                    <div className="spinner large"></div>
+                                    <h3>Creating your masterpiece...</h3>
+                                    <p className="progress-text">{progress || 'This may take a few minutes'}</p>
+                                    <div className="progress-steps">
+                                        <div className="progress-step active">Converting text to speech</div>
+                                        <div className="progress-step">Processing background video</div>
+                                        <div className="progress-step">Generating captions</div>
+                                        <div className="progress-step">Adding background music</div>
+                                        <div className="progress-step">Final rendering</div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {generatedVideoUrl && (
+                                <div className="video-result">
+                                    <div className="success-banner">
+                                        <span>🎉</span> Your video is ready!
+                                    </div>
+                                    
+                                    <div className="video-player-container">
                                         <video
-                                            src={`http://localhost:5000/${clip.subtitledPath}`}
                                             controls
-                                            style={{ width: '100%', maxWidth: '600px' }}
+                                            src={`http://localhost:5000/${generatedVideoUrl}`}
+                                            className="generated-video"
                                         />
                                     </div>
-                                )}
-                            </div>
-                        ))}
-                        {/* Subtitle Editor below all clips */}
-                        {editableSubtitles.length > 0 && selectedClipPath && (
-                            <div style={{padding: '20px', borderTop: '2px solid #ccc', marginTop: '30px'}}>
-                                <h3>Editing Subtitles for: {selectedClipPath}</h3>
-                                <div style={{
-                                    position: 'relative',
-                                    width: '100%',
-                                    maxWidth: '600px',
-                                    marginBottom: '20px'
-                                }}>
-                                    <video
-                                        ref={videoRef}
-                                        src={`http://localhost:5000/${selectedClipPath}`}
-                                        onTimeUpdate={handleTimeUpdate}
-                                        controls
-                                        style={{width: '100%'}}
-                                    />
-                                    <div
-                                        style={{
-                                            position: 'absolute',
-                                            bottom: '10%',
-                                            width: '100%',
-                                            textAlign: 'center',
-                                            fontSize: '42px',
-                                            color: '#ffff00', // bright yellow
-                                            fontFamily: 'Runescape UF Regular, sans-serif',
-                                            textShadow: '2px 2px 8px black',
-                                            pointerEvents: 'none'
-                                        }}
-                                    >
-                                        {currentSubtitleText}
+
+                                    <div className="video-actions">
+                                        <a 
+                                            href={`http://localhost:5000/${generatedVideoUrl}`}
+                                            download
+                                            className="btn-download"
+                                        >
+                                            📥 Download Video
+                                        </a>
+                                        <button 
+                                            className="btn-secondary"
+                                            onClick={resetWizard}
+                                        >
+                                            ✨ Create Another
+                                        </button>
                                     </div>
-
                                 </div>
+                            )}
+                        </div>
+                    )}
+                </div>
 
-                                <SubtitleEditor
-                                    subtitles={editableSubtitles}
-                                    onUpdate={setEditableSubtitles}
-                                />
-
-                                <button
-                                    onClick={async () => {
-                                        try {
-                                            setProgress('Burning final subtitles...');
-                                            const response = await axios.post('http://localhost:5000/burn-edited-subtitles', {
-                                                clipPath: selectedClipPath,
-                                                subtitles: editableSubtitles
-                                            });
-
-                                            setProgress('Subtitles burned successfully!');
-
-                                            setAutoClips(prev =>
-                                                prev.map(clip =>
-                                                    clip.path === selectedClipPath
-                                                        ? {...clip, subtitledPath: response.data.subtitledPath}
-                                                        : clip
-                                                )
-                                            );
-                                        } catch (err) {
-                                            console.error('Burn failed:', err);
-                                            alert('Failed to burn subtitles');
-                                        }
-                                    }}
-                                    style={{marginTop: '10px'}}
+                {/* Navigation */}
+                {!(currentStep === 5 && (isGeneratingVideo || generatedVideoUrl)) && (
+                    <div className="wizard-navigation">
+                        <button 
+                            className="btn-back"
+                            onClick={handleBack}
+                            disabled={currentStep === 1}
+                        >
+                            ← Back
+                        </button>
+                        
+                        {currentStep < 5 ? (
+                            <button 
+                                className="btn-next"
+                                onClick={handleNext}
+                                disabled={!canProceed() || isGeneratingStory}
+                            >
+                                {currentStep === 3 && !generatedStory ? 'Generate Story →' : 'Next →'}
+                            </button>
+                        ) : (
+                            !generatedVideoUrl && !isGeneratingVideo && (
+                                <button 
+                                    className="btn-next"
+                                    onClick={generateVideo}
+                                    disabled={isGeneratingVideo}
                                 >
-                                    Burn Final Subtitles
+                                    Generate Video 🚀
                                 </button>
-
-
-                            </div>
+                            )
                         )}
                     </div>
                 )}
@@ -347,6 +519,5 @@ function App() {
         </div>
     );
 }
-
 
 export default App;
