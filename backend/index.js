@@ -16,6 +16,40 @@ const port = 5000;
 const TEST_MODE = false; // Set to false to use real OpenAI API
 const ENABLE_SHORT_FORM = true; // Set to false for normal 16:9 videos
 
+// Hardware acceleration detection
+let HW_ACCEL_CODEC = 'libx264';  // Default software encoding
+let HW_ACCEL_OPTIONS = ['-preset', 'ultrafast', '-crf', '23'];
+
+// Detect available hardware encoders on startup
+(async () => {
+    const { spawn } = require('child_process');
+    try {
+        // Test for NVIDIA GPU (h264_nvenc)
+        const nvencTest = spawn('ffmpeg', ['-hide_banner', '-encoders']);
+        let encoders = '';
+        nvencTest.stdout.on('data', (data) => { encoders += data.toString(); });
+        await new Promise((resolve) => nvencTest.on('close', resolve));
+        
+        if (encoders.includes('h264_nvenc')) {
+            HW_ACCEL_CODEC = 'h264_nvenc';
+            HW_ACCEL_OPTIONS = ['-preset', 'p4', '-rc', 'vbr', '-cq', '23', '-b:v', '0'];
+            console.log('🚀 GPU Acceleration: NVIDIA NVENC detected');
+        } else if (encoders.includes('h264_qsv')) {
+            HW_ACCEL_CODEC = 'h264_qsv';
+            HW_ACCEL_OPTIONS = ['-preset', 'veryfast', '-global_quality', '23'];
+            console.log('🚀 GPU Acceleration: Intel QuickSync detected');
+        } else if (encoders.includes('h264_amf')) {
+            HW_ACCEL_CODEC = 'h264_amf';
+            HW_ACCEL_OPTIONS = ['-quality', 'speed', '-rc', 'vbr_latency', '-qp_i', '23'];
+            console.log('🚀 GPU Acceleration: AMD AMF detected');
+        } else {
+            console.log('⚠️ No GPU acceleration detected, using software encoding (slower)');
+        }
+    } catch (err) {
+        console.log('⚠️ Could not detect GPU, using software encoding');
+    }
+})();
+
 app.use(cors());
 app.use(express.json());
 app.use('/clips', express.static(path.join(__dirname, 'clips')));
@@ -30,7 +64,7 @@ const openai = new OpenAI({
 });
 
 // ElevenLabs setup
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY3;
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY2;
 const DEFAULT_VOICE_ID = '2EiwWnXFnvU5JabPnv8n';
 
 // Available voice models
@@ -94,7 +128,7 @@ function groupWordsIntoSubtitles(words, groupSize = 3) {
     return subtitles;
 }
 
-async function runWhisperX(audioPath, outputDir) {
+async function runWhisperX(audioPath, outputDir, modelSize = 'tiny') {
     return new Promise((resolve, reject) => {
         const jsonPath = path.join(outputDir, path.basename(audioPath, path.extname(audioPath)) + '.json');
 
@@ -102,7 +136,10 @@ async function runWhisperX(audioPath, outputDir) {
             audioPath,
             '--output_dir', outputDir,
             '--output_format', 'json',
-            '--language', 'en'
+            '--language', 'en',
+            '--model', modelSize,  // Use tiny model for faster processing (we only need timings)
+            '--compute_type', 'float32',  // Use float32 for CPU compatibility
+            '--vad_method', 'silero'      // Use silero VAD instead of pyannote to avoid PyTorch loading issues
         ]);
 
         whisper.stdout.on('data', (data) => {
@@ -373,6 +410,9 @@ async function addSubtitlesToClip(clipPath, subtitles, outputPath) {
 
             command
                 .videoFilter(subtitleFilter)
+                .videoCodec(HW_ACCEL_CODEC)  // Use hardware acceleration if available
+                .audioCodec('copy')  // Don't re-encode audio!
+                .outputOptions(HW_ACCEL_OPTIONS)
                 .output(outputPath)
                 .on('end', () => {
                     fs.unlinkSync(assPath);
@@ -661,63 +701,25 @@ app.post('/finalize-story', async (req, res) => {
         // i set it to zero because it messed with subtitles timing.
 
         const parkourSource = path.join(__dirname, '/background/parkour1.mp4');
-        const parkourClip = path.join('temp', `parkour-clip-${Date.now()}.mp4`);
         const parkourDuration = await getVideoDuration(parkourSource);
 
         const maxStart = Math.max(0, parkourDuration - bufferedDuration);
         const randomStart = parseFloat((Math.random() * maxStart).toFixed(2));
-        console.log(`🎯 Trimming video from ${randomStart}s for ${bufferedDuration}s (maxStart: ${maxStart})`);
+        console.log(`🎯 Processing video from ${randomStart}s for ${bufferedDuration}s (maxStart: ${maxStart})`);
         console.log("🎞️ Parkour duration:", parkourDuration);
         console.log("🔊 Audio + buffer duration:", bufferedDuration);
 
-        await new Promise((resolve, reject) => {
-            const command = ffmpeg(parkourSource)
-                .setStartTime(randomStart)
-                .setDuration(bufferedDuration);
-
-            if (ENABLE_SHORT_FORM) {
-                command
-                    .videoFilters([
-                        {
-                            filter: 'scale',
-                            options: {
-                                w: 1080,
-                                h: 1920,
-                                force_original_aspect_ratio: 'increase'
-                            }
-                        },
-                        {
-                            filter: 'crop',
-                            options: {
-                                w: 1080,
-                                h: 1920
-                            }
-                        }
-                    ])
-                    .outputOptions([
-                        '-movflags +faststart',
-                        '-preset fast',
-                        '-crf 18'
-                    ]);
-            }
-
-            command
-                .output(parkourClip)
-                .on('end', resolve)
-                .on('error', reject)
-                .run();
-        });
 
 
-
+        // 🚀 OPTIMIZED: Use tiny WhisperX model for faster alignment
         const outputDir = 'whisperx_output';
         if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
-        const jsonPath = await runWhisperX(audioPath, outputDir);
+        
+        console.log("🧠 Running WhisperX with tiny model for fast alignment...");
+        const jsonPath = await runWhisperX(audioPath, outputDir, 'tiny');  // Use tiny model for speed
         const words = loadWhisperXWords(jsonPath);
 
-
         let subtitles;
-
         if (TEST_MODE) {
             console.log("⚠️ TEST MODE: Using WhisperX word timings directly for subtitles");
             subtitles = groupWordsIntoSubtitles(words);
@@ -733,95 +735,126 @@ app.post('/finalize-story', async (req, res) => {
         }
 
         const finalVideo = path.join('clips', `story-${Date.now()}.mp4`);
+        const tempWithoutMusic = path.join('temp', `combined-${Date.now()}.mp4`);
 
-        console.log("🔊 Merging audio from:", audioPath);
-        console.log("🎞️ Merging into video:", parkourClip);
-        console.log("📤 Output path will be:", finalVideo);
+        console.log("🚀 OPTIMIZED: Combining trim + scale + merge + speedup in ONE pass");
 
+        // PASS 1: Trim + Scale + Crop + Merge Audio + Speed up (1.4x) - ALL IN ONE!
         await new Promise((resolve, reject) => {
-            ffmpeg()
-                .input(parkourClip)     // 🎥 Video
-                .input(audioPath)       // 🔊 Audio
-                .videoCodec('libx264')
+            const command = ffmpeg();
+            
+            command
+                .input(parkourSource)
+                .inputOptions([
+                    `-ss ${randomStart}`,
+                    `-t ${bufferedDuration}`
+                ])
+                .input(audioPath);
+
+            // Build video filter chain: scale + crop + speed up
+            let videoFilterChain = [];
+            if (ENABLE_SHORT_FORM) {
+                videoFilterChain.push(
+                    'scale=1080:1920:force_original_aspect_ratio=increase',
+                    'crop=1080:1920',
+                    'setpts=0.7143*PTS'  // Speed up video by 1.4x
+                );
+            } else {
+                videoFilterChain.push('setpts=0.7143*PTS');
+            }
+
+            command
+                .videoFilter(videoFilterChain.join(','))
+                .audioFilter('atempo=1.4')  // Speed up audio by 1.4x
+                .videoCodec(HW_ACCEL_CODEC)  // Use hardware acceleration if available
                 .audioCodec('aac')
                 .outputOptions([
-                    '-map 0:v:0',        // map video stream
-                    '-map 1:a:0',        // map audio stream
-                    '-shortest'          // cut to shortest of video/audio
+                    ...HW_ACCEL_OPTIONS,  // Hardware-specific options
+                    '-map 0:v:0',
+                    '-map 1:a:0',
+                    '-shortest',
+                    '-movflags +faststart'
                 ])
-                .output(finalVideo)
-                .on('start', (cmdLine) => {
-                    console.log("📸 ffmpeg merge command:", cmdLine);
-                })
+                .output(tempWithoutMusic)
                 .on('end', resolve)
                 .on('error', (err) => {
-                    console.error("❌ ffmpeg merge error:", err);
+                    console.error("❌ Combined ffmpeg error:", err);
                     reject(err);
                 })
                 .run();
         });
 
+        // PASS 2: Add subtitles only (no music yet)
+        console.log("💬 Burning subtitles with GPU acceleration...");
+        const subtitledVideoPath = tempWithoutMusic.replace('.mp4', '-subtitled.mp4');
+        
+        // Adjust subtitle timings for 1.4x speed
+        const adjustedSubtitles = subtitles.map(sub => ({
+            start: sub.start / 1.4,
+            end: sub.end / 1.4,
+            text: sub.text
+        }));
+        
+        await addSubtitlesToClip(tempWithoutMusic, adjustedSubtitles, subtitledVideoPath);
 
-        const subtitledVideoPath = finalVideo.replace('.mp4', '-subtitled.mp4');
-        await addSubtitlesToClip(finalVideo, subtitles, subtitledVideoPath);
-
-// Overwrite original with subtitled version
-        fs.unlinkSync(finalVideo);
-        fs.renameSync(subtitledVideoPath, finalVideo);
-
-// Speed up then repeat replacement
-        const speedUpPath = finalVideo.replace('.mp4', '-spedup.mp4');
-
-        await new Promise((resolve, reject) => {
-            ffmpeg(finalVideo)
-                .videoFilter('setpts=0.7143*PTS') // 1 / 1.4 = ~0.7143 division to set pitch of audio
-                .audioFilter('atempo=1.4')        // audio tempo
-                .outputOptions('-movflags +faststart')
-                .output(speedUpPath)
-                .on('end', resolve)
-                .on('error', reject)
-                .run();
-        });
-
-        fs.unlinkSync(finalVideo); // remove the original
-        fs.renameSync(speedUpPath, finalVideo); // overwrite with sped-up version
+        // Clean up temp file
+        fs.unlinkSync(tempWithoutMusic);
 
 
+        // PASS 3: Add music (fast - uses video copy)
         const musicDir = path.join(__dirname, 'music', genre.toLowerCase());
-        const musicFiles = fs.readdirSync(musicDir).filter(f => f.endsWith('.mp3'));
-
+        
+        // Fallback to a default genre if the specific genre folder doesn't exist
+        let musicFiles = [];
+        if (fs.existsSync(musicDir)) {
+            musicFiles = fs.readdirSync(musicDir).filter(f => f.endsWith('.mp3'));
+        }
+        
+        // If no music for this genre, try fallback genres
         if (musicFiles.length === 0) {
-            throw new Error(`No music files found for genre: ${genre}`);
+            const fallbackGenres = ['AITA', 'TIFU', 'MaliciousCompliance', 'AmIOverreacting'];
+            for (const fallback of fallbackGenres) {
+                const fallbackDir = path.join(__dirname, 'music', fallback);
+                if (fs.existsSync(fallbackDir)) {
+                    const fallbackFiles = fs.readdirSync(fallbackDir).filter(f => f.endsWith('.mp3'));
+                    if (fallbackFiles.length > 0) {
+                        console.log(`⚠️ No music for ${genre}, using ${fallback} music instead`);
+                        musicFiles = fallbackFiles.map(f => path.join(fallbackDir, f));
+                        break;
+                    }
+                }
+            }
+        } else {
+            musicFiles = musicFiles.map(f => path.join(musicDir, f));
         }
 
-        const randomMusicFile = musicFiles[Math.floor(Math.random() * musicFiles.length)];
-        const musicPath = path.join(musicDir, randomMusicFile);
+        if (musicFiles.length === 0) {
+            throw new Error(`No music files found for any genre`);
+        }
+
+        const musicPath = musicFiles[Math.floor(Math.random() * musicFiles.length)];
 
         console.log(`🎵 Adding background music from: ${musicPath}`);
 
-        const withMusicPath = finalVideo.replace('.mp4', '-withmusic.mp4');
-
         await new Promise((resolve, reject) => {
             ffmpeg()
-                .input(finalVideo)           // Original sped-up video
+                .input(subtitledVideoPath)   // Video with subtitles
                 .input(musicPath)            // Background music
                 .inputOptions('-stream_loop', '-1') // loop music infinitely
-
                 .complexFilter([
                     '[1:a]volume=0.15[a1]',  // Lower volume of music
                     '[0:a][a1]amix=inputs=2:duration=shortest' // cuts music to shortest of video/audio
                 ])
                 .audioCodec('aac')
-                .videoCodec('copy')          // Copy video stream
-                .output(withMusicPath)
+                .videoCodec('copy')          // Copy video stream (fast!)
+                .output(finalVideo)
                 .on('end', resolve)
                 .on('error', reject)
                 .run();
         });
 
-// Replace final video with version that has music
-        fs.unlinkSync(finalVideo);
-        fs.renameSync(withMusicPath, finalVideo);
+        // Clean up temp file
+        fs.unlinkSync(subtitledVideoPath);
 
 
         res.json({
