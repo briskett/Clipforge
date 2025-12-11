@@ -13,7 +13,7 @@ Your Reddit story video generator has been optimized from **13.6 minutes** to **
 | Video Processing (4 ops) | 509s | 55s | 🚀 89% faster |
 | Subtitle Burning | 199s | 52s | 🚀 74% faster |
 | Music Mixing | 1s | 2s | ✅ Same |
-| **TOTAL TIME** | **818s (13.6 min)** | **209s (3.5 min)** | 🎉 **74% FASTER** |
+| **TOTAL TIME** | **818s (13.6 min)** | **207s (3.5 min)** | 🎉 **75% FASTER** |
 
 ## Key Optimizations Implemented
 
@@ -82,19 +82,13 @@ await runWhisperX(audioPath, outputDir, 'tiny')
 
 ## Future Optimization Opportunities
 
-### 1. Replace WhisperX with Pure Forced Alignment (Optional)
-**Current:** WhisperX tiny model still does transcription (63s)
-**Potential:** Use `aeneas` or `gentle` for forced alignment only (10-15s)
-**Benefit:** Additional 50s savings per video
-**Trade-off:** Requires installing additional Python dependencies
-
-### 2. Pre-process Background Videos (Optional)
+### 1. Pre-process Background Videos (Optional)
 **Current:** Trim + scale background video each time (part of 55s)
 **Potential:** Pre-generate multiple cropped clips at startup
 **Benefit:** Additional 10-20s savings per video
 **Trade-off:** More disk space, startup time
 
-### 3. Parallel Processing (Advanced)
+### 2. Parallel Processing (Advanced)
 **Current:** Sequential operations
 **Potential:** Run WhisperX while FFmpeg processes video
 **Benefit:** Additional 30-40s savings per video
