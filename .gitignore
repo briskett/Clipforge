@@ -31,3 +31,5 @@ backend/whisperx_output
 *.sw?
 *.mp4
 
+*.env*
+*.env

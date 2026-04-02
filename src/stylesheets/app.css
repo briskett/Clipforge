@@ -63,6 +63,13 @@ body {
     margin-bottom: 48px;
 }
 
+.header-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
 .logo {
     font-size: 2.5rem;
     font-weight: 700;
@@ -72,13 +79,43 @@ body {
     background-clip: text;
     display: flex;
     align-items: center;
-    justify-content: center;
     gap: 12px;
 }
 
 .logo-icon {
     font-size: 2rem;
     -webkit-text-fill-color: initial;
+}
+
+.user-menu {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.user-greeting {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+
+.logout-btn {
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-family: inherit;
+}
+
+.logout-btn:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+    border-color: var(--danger);
 }
 
 .tagline {
@@ -764,6 +801,16 @@ body {
 @media (max-width: 600px) {
     .wizard-wrapper {
         padding: 24px 16px 80px;
+    }
+    
+    .header-top {
+        flex-direction: column;
+        gap: 16px;
+    }
+    
+    .user-menu {
+        width: 100%;
+        justify-content: center;
     }
     
     .step-content {

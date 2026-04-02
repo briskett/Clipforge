@@ -1,6 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import axios from 'axios';
+import { useAuth } from './contexts/AuthContext';
+import UsageBar from './components/UsageBar';
+import PricingModal from './components/PricingModal';
 import './stylesheets/app.css';
+
+const API_URL = 'http://localhost:5000';
 
 const STEPS = [
     { id: 1, title: 'Choose Subreddit', icon: '📖' },
@@ -34,6 +39,7 @@ const VOICES = [
 ];
 
 function App() {
+    const { user, logout, session } = useAuth();
     const [currentStep, setCurrentStep] = useState(1);
     const [selectedSubreddit, setSelectedSubreddit] = useState(null);
     const [selectedBackground, setSelectedBackground] = useState('minecraft');
@@ -49,6 +55,48 @@ function App() {
     const [playingVoice, setPlayingVoice] = useState(null);
     const [loadingVoice, setLoadingVoice] = useState(null);
     const audioRef = useRef(null);
+    
+    // Subscription/usage state
+    const [usage, setUsage] = useState({ used: 0, limit: 2, tier: 'free' });
+    const [showPricingModal, setShowPricingModal] = useState(false);
+
+    const handleLogout = () => {
+        logout();
+    };
+
+    // Create axios instance with auth header
+    const api = useMemo(() => {
+        const instance = axios.create({ baseURL: API_URL });
+        instance.interceptors.request.use((config) => {
+            if (session?.access_token) {
+                config.headers.Authorization = `Bearer ${session.access_token}`;
+            }
+            return config;
+        });
+        return instance;
+    }, [session]);
+
+    // Fetch usage on mount and when session changes
+    useEffect(() => {
+        if (session) {
+            fetchUsage();
+        }
+    }, [session]);
+
+    const fetchUsage = async () => {
+        try {
+            const response = await api.get('/subscription/status');
+            if (response.data.success) {
+                setUsage({
+                    used: response.data.usage.used,
+                    limit: response.data.usage.limit,
+                    tier: response.data.subscription.tier
+                });
+            }
+        } catch (error) {
+            console.error('Failed to fetch usage:', error);
+        }
+    };
 
     // Stop audio when leaving voice selection step
     useEffect(() => {
@@ -78,8 +126,8 @@ function App() {
         
         try {
             // Fetch preview URL from backend
-            const response = await axios.get(`http://localhost:5000/preview-voice/${voiceId}`);
-            const previewUrl = `http://localhost:5000${response.data.previewUrl}`;
+            const response = await api.get(`/preview-voice/${voiceId}`);
+            const previewUrl = `${API_URL}${response.data.previewUrl}`;
             
             // Create and play audio
             const audio = new Audio(previewUrl);
@@ -137,7 +185,7 @@ function App() {
         setIsGeneratingStory(true);
         setProgress('Crafting your story with AI...');
         try {
-            const response = await axios.post('http://localhost:5000/generate-story-text', {
+            const response = await api.post('/generate-story-text', {
                 genre: selectedSubreddit
             });
             setGeneratedStory(response.data.story);
@@ -155,16 +203,7 @@ function App() {
         setProgress('Creating your video...');
         
         try {
-            const formData = new FormData();
-            formData.append('genre', selectedSubreddit);
-            formData.append('story', generatedStory);
-            formData.append('voiceId', selectedVoice);
-            
-            if (selectedBackground === 'custom' && customBackgroundFile) {
-                formData.append('customBackground', customBackgroundFile);
-            }
-
-            const response = await axios.post('http://localhost:5000/finalize-story', {
+            const response = await api.post('/finalize-story', {
                 genre: selectedSubreddit,
                 story: generatedStory,
                 voiceId: selectedVoice,
@@ -173,9 +212,24 @@ function App() {
 
             setGeneratedVideoUrl(response.data.videoPath);
             setProgress('');
+            
+            // Update usage after successful generation
+            if (response.data.usage) {
+                setUsage(prev => ({
+                    ...prev,
+                    used: response.data.usage.used,
+                }));
+            }
         } catch (error) {
             console.error('Error generating video:', error);
-            alert('Failed to generate video. Please try again.');
+            
+            // Handle quota exceeded error
+            if (error.response?.status === 403) {
+                setShowPricingModal(true);
+                alert(error.response.data.message || 'You\'ve reached your generation limit. Please upgrade your plan!');
+            } else {
+                alert('Failed to generate video. Please try again.');
+            }
         } finally {
             setIsGeneratingVideo(false);
         }
@@ -197,10 +251,18 @@ function App() {
             <div className="wizard-wrapper">
                 {/* Header */}
                 <header className="wizard-header">
-                    <h1 className="logo">
-                        <span className="logo-icon">🎬</span>
-                        ClipForge
-                    </h1>
+                    <div className="header-top">
+                        <h1 className="logo">
+                            <span className="logo-icon">🎬</span>
+                            ClipForge
+                        </h1>
+                        <div className="user-menu">
+                            <span className="user-greeting">Hey, {user?.user_metadata?.username || user?.email?.split('@')[0] || 'User'}!</span>
+                            <button className="logout-btn" onClick={handleLogout}>
+                                Sign Out
+                            </button>
+                        </div>
+                    </div>
                     <p className="tagline">Create viral Reddit story videos in minutes</p>
                 </header>
 
@@ -219,6 +281,14 @@ function App() {
                         </div>
                     ))}
                 </div>
+
+                {/* Usage Bar */}
+                <UsageBar 
+                    used={usage.used}
+                    limit={usage.limit}
+                    tier={usage.tier}
+                    onUpgrade={() => setShowPricingModal(true)}
+                />
 
                 {/* Step Content */}
                 <div className="step-content">
@@ -457,14 +527,14 @@ function App() {
                                     <div className="video-player-container">
                                         <video
                                             controls
-                                            src={`http://localhost:5000/${generatedVideoUrl}`}
+                                            src={`${API_URL}/${generatedVideoUrl}`}
                                             className="generated-video"
                                         />
                                     </div>
 
                                     <div className="video-actions">
                                         <a 
-                                            href={`http://localhost:5000/${generatedVideoUrl}`}
+                                            href={`${API_URL}/${generatedVideoUrl}`}
                                             download
                                             className="btn-download"
                                         >
@@ -516,6 +586,13 @@ function App() {
                     </div>
                 )}
             </div>
+
+            {/* Pricing Modal */}
+            <PricingModal 
+                isOpen={showPricingModal}
+                onClose={() => setShowPricingModal(false)}
+                currentTier={usage.tier}
+            />
         </div>
     );
 }
