@@ -1,18 +1,22 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import axios from 'axios';
-import { useAuth } from './contexts/AuthContext';
-import UsageBar from './components/UsageBar';
-import PricingModal from './components/PricingModal';
+import {
+    hasStoredApiKey,
+    saveStoredApiKey,
+    removeStoredApiKey,
+    getApiKeyHeaders,
+} from './lib/apiKeys';
 import './stylesheets/app.css';
 
 const API_URL = 'http://localhost:5000';
 
 const STEPS = [
-    { id: 1, title: 'Choose Subreddit', icon: '📖' },
-    { id: 2, title: 'Select Background', icon: '🎬' },
-    { id: 3, title: 'Pick Voice', icon: '🎙️' },
-    { id: 4, title: 'Review Story', icon: '✏️' },
-    { id: 5, title: 'Generate Video', icon: '🚀' },
+    { id: 1, title: 'API Keys', icon: '🔑' },
+    { id: 2, title: 'Choose Subreddit', icon: '📖' },
+    { id: 3, title: 'Select Background', icon: '🎬' },
+    { id: 4, title: 'Pick Voice', icon: '🎙️' },
+    { id: 5, title: 'Review Story', icon: '✏️' },
+    { id: 6, title: 'Generate Video', icon: '🚀' },
 ];
 
 const SUBREDDITS = [
@@ -39,7 +43,6 @@ const VOICES = [
 ];
 
 function App() {
-    const { user, logout, session } = useAuth();
     const [currentStep, setCurrentStep] = useState(1);
     const [selectedSubreddit, setSelectedSubreddit] = useState(null);
     const [selectedBackground, setSelectedBackground] = useState('minecraft');
@@ -50,57 +53,77 @@ function App() {
     const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
     const [generatedVideoUrl, setGeneratedVideoUrl] = useState('');
     const [progress, setProgress] = useState('');
+    const [generationLogs, setGenerationLogs] = useState([]);
     
+    const logBoxRef = useRef(null);
     // Voice preview state
     const [playingVoice, setPlayingVoice] = useState(null);
     const [loadingVoice, setLoadingVoice] = useState(null);
     const audioRef = useRef(null);
-    
-    // Subscription/usage state
-    const [usage, setUsage] = useState({ used: 0, limit: 2, tier: 'free' });
-    const [showPricingModal, setShowPricingModal] = useState(false);
+    const [openAIKey, setOpenAIKey] = useState('');
+    const [hasOpenAIKey, setHasOpenAIKey] = useState(false);
+    const [elevenLabsKey, setElevenLabsKey] = useState('');
+    const [hasElevenLabsKey, setHasElevenLabsKey] = useState(false);
 
-    const handleLogout = () => {
-        logout();
-    };
-
-    // Create axios instance with auth header
     const api = useMemo(() => {
         const instance = axios.create({ baseURL: API_URL });
         instance.interceptors.request.use((config) => {
-            if (session?.access_token) {
-                config.headers.Authorization = `Bearer ${session.access_token}`;
-            }
+            Object.assign(config.headers, getApiKeyHeaders());
             return config;
         });
         return instance;
-    }, [session]);
+    }, []);
 
-    // Fetch usage on mount and when session changes
     useEffect(() => {
-        if (session) {
-            fetchUsage();
-        }
-    }, [session]);
+        setHasOpenAIKey(hasStoredApiKey('openai'));
+        setHasElevenLabsKey(hasStoredApiKey('elevenlabs'));
+    }, []);
 
-    const fetchUsage = async () => {
-        try {
-            const response = await api.get('/subscription/status');
-            if (response.data.success) {
-                setUsage({
-                    used: response.data.usage.used,
-                    limit: response.data.usage.limit,
-                    tier: response.data.subscription.tier
-                });
-            }
-        } catch (error) {
-            console.error('Failed to fetch usage:', error);
+    const saveApiKey = (provider) => {
+        const keyValue = (provider === 'openai' ? openAIKey : elevenLabsKey).trim();
+        if (!keyValue) {
+            alert(`Please enter your ${provider === 'openai' ? 'OpenAI' : 'ElevenLabs'} API key first.`);
+            return;
+        }
+        if (provider === 'openai' && !keyValue.startsWith('sk-')) {
+            alert('Invalid OpenAI API key format (should start with sk-).');
+            return;
+        }
+        if (provider === 'elevenlabs' && !keyValue.startsWith('sk_')) {
+            alert('Invalid ElevenLabs API key format (should start with sk_).');
+            return;
+        }
+
+        saveStoredApiKey(provider, keyValue);
+        if (provider === 'openai') {
+            setHasOpenAIKey(true);
+            setOpenAIKey('');
+        } else {
+            setHasElevenLabsKey(true);
+            setElevenLabsKey('');
         }
     };
 
+    const removeApiKey = (provider) => {
+        removeStoredApiKey(provider);
+        if (provider === 'openai') {
+            setHasOpenAIKey(false);
+            setOpenAIKey('');
+        } else {
+            setHasElevenLabsKey(false);
+            setElevenLabsKey('');
+        }
+    };
+
+    useEffect(() => {
+        if (logBoxRef.current) {
+            logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
+        }
+    }, [generationLogs]);
+
     // Stop audio when leaving voice selection step
     useEffect(() => {
-        if (currentStep !== 3 && audioRef.current) {
+        if (currentStep !== 4 && audioRef.current) {
             audioRef.current.pause();
             audioRef.current = null;
             setPlayingVoice(null);
@@ -148,7 +171,7 @@ function App() {
             
         } catch (error) {
             console.error('Error playing voice preview:', error);
-            alert('Failed to load voice preview. Please try again.');
+            alert(error.response?.data?.error || 'Failed to load voice preview. Make sure your ElevenLabs key is saved.');
         } finally {
             setLoadingVoice(null);
         }
@@ -156,21 +179,21 @@ function App() {
 
     const canProceed = () => {
         switch (currentStep) {
-            case 1: return selectedSubreddit !== null;
-            case 2: return selectedBackground === 'minecraft' || customBackgroundFile !== null;
-            case 3: return selectedVoice !== null;
-            case 4: return generatedStory.trim().length > 0;
-            case 5: return true;
+            case 1: return hasOpenAIKey && hasElevenLabsKey;
+            case 2: return selectedSubreddit !== null;
+            case 3: return selectedBackground === 'minecraft' || customBackgroundFile !== null;
+            case 4: return selectedVoice !== null && hasElevenLabsKey;
+            case 5: return generatedStory.trim().length > 0;
+            case 6: return true;
             default: return false;
         }
     };
 
     const handleNext = async () => {
-        if (currentStep === 3 && !generatedStory) {
-            // Generate story when moving to step 4
+        if (currentStep === 4 && !generatedStory) {
             await generateStory();
         }
-        if (currentStep < 5) {
+        if (currentStep < 6) {
             setCurrentStep(currentStep + 1);
         }
     };
@@ -192,44 +215,102 @@ function App() {
             setProgress('');
         } catch (error) {
             console.error('Error generating story:', error);
-            alert('Failed to generate story. Please try again.');
+            alert(error.response?.data?.message || error.response?.data?.error || 'Failed to generate story. Please try again.');
         } finally {
             setIsGeneratingStory(false);
         }
     };
 
+    const appendGenerationLog = (message) => {
+        setGenerationLogs((prev) => [...prev, message]);
+        setProgress(message);
+    };
+
     const generateVideo = async () => {
         setIsGeneratingVideo(true);
-        setProgress('Creating your video...');
-        
+        setGeneratedVideoUrl('');
+        setGenerationLogs(['Sending request to server...']);
+        setProgress('Sending request to server...');
+
         try {
-            const response = await api.post('/finalize-story', {
-                genre: selectedSubreddit,
-                story: generatedStory,
-                voiceId: selectedVoice,
-                backgroundType: selectedBackground
+            const response = await fetch(`${API_URL}/finalize-story`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getApiKeyHeaders(),
+                },
+                body: JSON.stringify({
+                    genre: selectedSubreddit,
+                    story: generatedStory,
+                    voiceId: selectedVoice,
+                    backgroundType: selectedBackground,
+                }),
             });
 
-            setGeneratedVideoUrl(response.data.videoPath);
-            setProgress('');
-            
-            // Update usage after successful generation
-            if (response.data.usage) {
-                setUsage(prev => ({
-                    ...prev,
-                    used: response.data.usage.used,
-                }));
+            const contentType = response.headers.get('content-type') || '';
+            if (!response.ok && contentType.includes('application/json')) {
+                const err = await response.json();
+                throw new Error(err.message || err.error || 'Failed to generate video');
             }
+            if (!response.ok) {
+                throw new Error('Failed to generate video');
+            }
+
+            if (!contentType.includes('text/event-stream')) {
+                const data = await response.json();
+                if (data.videoPath) {
+                    setGeneratedVideoUrl(data.videoPath);
+                    return;
+                }
+                throw new Error(data.message || data.error || 'Failed to generate video');
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let videoPath = null;
+            let streamError = null;
+
+            const handleEvent = (data) => {
+                if (data.type === 'log') {
+                    appendGenerationLog(data.message);
+                } else if (data.type === 'complete') {
+                    videoPath = data.videoPath;
+                } else if (data.type === 'error') {
+                    streamError = new Error(data.message || 'Failed to generate video');
+                }
+            };
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const parts = buffer.split('\n\n');
+                buffer = parts.pop() || '';
+
+                for (const part of parts) {
+                    if (!part.trim().startsWith('data: ')) continue;
+                    handleEvent(JSON.parse(part.trim().slice(6)));
+                }
+            }
+
+            if (buffer.trim().startsWith('data: ')) {
+                handleEvent(JSON.parse(buffer.trim().slice(6)));
+            }
+
+            if (streamError) throw streamError;
+
+            if (!videoPath) {
+                throw new Error('Video generation finished without a result');
+            }
+
+            setGeneratedVideoUrl(videoPath);
+            setProgress('');
         } catch (error) {
             console.error('Error generating video:', error);
-            
-            // Handle quota exceeded error
-            if (error.response?.status === 403) {
-                setShowPricingModal(true);
-                alert(error.response.data.message || 'You\'ve reached your generation limit. Please upgrade your plan!');
-            } else {
-                alert('Failed to generate video. Please try again.');
-            }
+            appendGenerationLog(`Error: ${error.message || 'Failed to generate video'}`);
+            alert(error.message || 'Failed to generate video. Please try again.');
         } finally {
             setIsGeneratingVideo(false);
         }
@@ -244,6 +325,7 @@ function App() {
         setGeneratedStory('');
         setGeneratedVideoUrl('');
         setProgress('');
+        setGenerationLogs([]);
     };
 
     return (
@@ -251,18 +333,10 @@ function App() {
             <div className="wizard-wrapper">
                 {/* Header */}
                 <header className="wizard-header">
-                    <div className="header-top">
-                        <h1 className="logo">
-                            <span className="logo-icon">🎬</span>
-                            ClipForge
-                        </h1>
-                        <div className="user-menu">
-                            <span className="user-greeting">Hey, {user?.user_metadata?.username || user?.email?.split('@')[0] || 'User'}!</span>
-                            <button className="logout-btn" onClick={handleLogout}>
-                                Sign Out
-                            </button>
-                        </div>
-                    </div>
+                    <h1 className="logo">
+                        <span className="logo-icon">🎬</span>
+                        ClipForge
+                    </h1>
                     <p className="tagline">Create viral Reddit story videos in minutes</p>
                 </header>
 
@@ -282,18 +356,108 @@ function App() {
                     ))}
                 </div>
 
-                {/* Usage Bar */}
-                <UsageBar 
-                    used={usage.used}
-                    limit={usage.limit}
-                    tier={usage.tier}
-                    onUpgrade={() => setShowPricingModal(true)}
-                />
-
                 {/* Step Content */}
                 <div className="step-content">
-                    {/* Step 1: Choose Subreddit */}
+                    {/* Step 1: API Keys */}
                     {currentStep === 1 && (
+                        <div className="step-panel fade-in">
+                            <h2>Connect your API keys</h2>
+                            <p className="step-description">
+                                ClipForge is a live demo — bring your own keys. They stay in your browser and are sent directly to OpenAI and ElevenLabs when you generate.
+                            </p>
+
+                            <div className="api-keys-grid">
+                                <div className="api-key-card">
+                                    <div className="api-key-header">
+                                        <span className="api-key-icon">🤖</span>
+                                        <div>
+                                            <h3>OpenAI</h3>
+                                            <p>Generates your Reddit story text</p>
+                                        </div>
+                                        <span className={`api-key-badge ${hasOpenAIKey ? 'saved' : ''}`}>
+                                            {hasOpenAIKey ? 'Saved' : 'Required'}
+                                        </span>
+                                    </div>
+                                    <div className="api-key-input-row">
+                                        <input
+                                            type="password"
+                                            value={openAIKey}
+                                            onChange={(e) => setOpenAIKey(e.target.value)}
+                                            placeholder="sk-..."
+                                            autoComplete="off"
+                                        />
+                                        <button
+                                            className="btn-secondary"
+                                            onClick={() => saveApiKey('openai')}
+                                            disabled={!openAIKey.trim()}
+                                            type="button"
+                                        >
+                                            {hasOpenAIKey ? 'Update' : 'Save'}
+                                        </button>
+                                        {hasOpenAIKey && (
+                                            <button
+                                                className="btn-back"
+                                                onClick={() => removeApiKey('openai')}
+                                                disabled={false}
+                                                type="button"
+                                            >
+                                                Remove
+                                            </button>
+                                        )}
+                                    </div>
+                                    <a className="api-key-link" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">
+                                        Get an OpenAI key →
+                                    </a>
+                                </div>
+
+                                <div className="api-key-card">
+                                    <div className="api-key-header">
+                                        <span className="api-key-icon">🎙️</span>
+                                        <div>
+                                            <h3>ElevenLabs</h3>
+                                            <p>Voice previews and narration</p>
+                                        </div>
+                                        <span className={`api-key-badge ${hasElevenLabsKey ? 'saved' : ''}`}>
+                                            {hasElevenLabsKey ? 'Saved' : 'Required'}
+                                        </span>
+                                    </div>
+                                    <div className="api-key-input-row">
+                                        <input
+                                            type="password"
+                                            value={elevenLabsKey}
+                                            onChange={(e) => setElevenLabsKey(e.target.value)}
+                                            placeholder="sk_..."
+                                            autoComplete="off"
+                                        />
+                                        <button
+                                            className="btn-secondary"
+                                            onClick={() => saveApiKey('elevenlabs')}
+                                            disabled={!elevenLabsKey.trim()}
+                                            type="button"
+                                        >
+                                            {hasElevenLabsKey ? 'Update' : 'Save'}
+                                        </button>
+                                        {hasElevenLabsKey && (
+                                            <button
+                                                className="btn-back"
+                                                onClick={() => removeApiKey('elevenlabs')}
+                                                disabled={false}
+                                                type="button"
+                                            >
+                                                Remove
+                                            </button>
+                                        )}
+                                    </div>
+                                    <a className="api-key-link" href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer">
+                                        Get an ElevenLabs key →
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Step 2: Choose Subreddit */}
+                    {currentStep === 2 && (
                         <div className="step-panel fade-in">
                             <h2>What kind of story do you want?</h2>
                             <p className="step-description">Choose a subreddit style for your AI-generated story</p>
@@ -321,8 +485,8 @@ function App() {
                         </div>
                     )}
 
-                    {/* Step 2: Select Background */}
-                    {currentStep === 2 && (
+                    {/* Step 3: Select Background */}
+                    {currentStep === 3 && (
                         <div className="step-panel fade-in">
                             <h2>Choose your background video</h2>
                             <p className="step-description">This plays behind your story narration</p>
@@ -373,8 +537,8 @@ function App() {
                         </div>
                     )}
 
-                    {/* Step 3: Pick Voice */}
-                    {currentStep === 3 && (
+                    {/* Step 4: Pick Voice */}
+                    {currentStep === 4 && (
                         <div className="step-panel fade-in">
                             <h2>Select a narrator voice</h2>
                             <p className="step-description">Powered by ElevenLabs AI voices — click the play button to preview</p>
@@ -415,8 +579,8 @@ function App() {
                         </div>
                     )}
 
-                    {/* Step 4: Review Story */}
-                    {currentStep === 4 && (
+                    {/* Step 5: Review Story */}
+                    {currentStep === 5 && (
                         <div className="step-panel fade-in">
                             <h2>Review & Edit Your Story</h2>
                             <p className="step-description">Make sure everything reads exactly how you want it spoken</p>
@@ -462,8 +626,8 @@ function App() {
                         </div>
                     )}
 
-                    {/* Step 5: Generate Video */}
-                    {currentStep === 5 && (
+                    {/* Step 6: Generate Video */}
+                    {currentStep === 6 && (
                         <div className="step-panel fade-in">
                             <h2>Generate Your Video</h2>
                             
@@ -493,13 +657,6 @@ function App() {
                                             <span className="summary-value">{generatedStory.length} characters</span>
                                         </div>
                                     </div>
-
-                                    <button 
-                                        className="btn-generate"
-                                        onClick={generateVideo}
-                                    >
-                                        🚀 Generate Video
-                                    </button>
                                 </>
                             )}
 
@@ -508,12 +665,15 @@ function App() {
                                     <div className="spinner large"></div>
                                     <h3>Creating your masterpiece...</h3>
                                     <p className="progress-text">{progress || 'This may take a few minutes'}</p>
-                                    <div className="progress-steps">
-                                        <div className="progress-step active">Converting text to speech</div>
-                                        <div className="progress-step">Processing background video</div>
-                                        <div className="progress-step">Generating captions</div>
-                                        <div className="progress-step">Adding background music</div>
-                                        <div className="progress-step">Final rendering</div>
+                                    <div className="generation-log-box" ref={logBoxRef}>
+                                        {generationLogs.map((line, index) => (
+                                            <div
+                                                key={index}
+                                                className={`generation-log-line${line.startsWith('  ') ? ' subprocess' : ''}${line.startsWith('Error:') ? ' error' : ''}`}
+                                            >
+                                                {line}
+                                            </div>
+                                        ))}
                                     </div>
                                 </div>
                             )}
@@ -554,7 +714,7 @@ function App() {
                 </div>
 
                 {/* Navigation */}
-                {!(currentStep === 5 && (isGeneratingVideo || generatedVideoUrl)) && (
+                {!(currentStep === 6 && (isGeneratingVideo || generatedVideoUrl)) && (
                     <div className="wizard-navigation">
                         <button 
                             className="btn-back"
@@ -564,13 +724,13 @@ function App() {
                             ← Back
                         </button>
                         
-                        {currentStep < 5 ? (
+                        {currentStep < 6 ? (
                             <button 
                                 className="btn-next"
                                 onClick={handleNext}
                                 disabled={!canProceed() || isGeneratingStory}
                             >
-                                {currentStep === 3 && !generatedStory ? 'Generate Story →' : 'Next →'}
+                                {currentStep === 4 && !generatedStory ? 'Generate Story →' : 'Next →'}
                             </button>
                         ) : (
                             !generatedVideoUrl && !isGeneratingVideo && (
@@ -586,13 +746,6 @@ function App() {
                     </div>
                 )}
             </div>
-
-            {/* Pricing Modal */}
-            <PricingModal 
-                isOpen={showPricingModal}
-                onClose={() => setShowPricingModal(false)}
-                currentTier={usage.tier}
-            />
         </div>
     );
 }

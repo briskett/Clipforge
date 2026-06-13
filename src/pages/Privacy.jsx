@@ -167,9 +167,7 @@ export default function Privacy() {
                 <div className="legal-footer">
                     <Link to="/terms">Terms of Service</Link>
                     <span className="footer-dot">•</span>
-                    <Link to="/login">Sign In</Link>
-                    <span className="footer-dot">•</span>
-                    <Link to="/signup">Create Account</Link>
+                    <Link to="/">Back to ClipForge</Link>
                 </div>
             </div>
         </div>

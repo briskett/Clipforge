@@ -6,10 +6,10 @@ const fs = require('fs');
 const cors = require('cors');
 const { OpenAI } = require('openai');
 const { spawn } = require('child_process');
-const { router: authRouter, authMiddleware } = require('./auth');
-const { router: subscriptionRouter, checkQuota, incrementUserGeneration, canGenerate } = require('./subscriptions');
-const { router: stripeRouter } = require('./stripe');
-require('dotenv').config();
+const dotenv = require('dotenv');
+
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+dotenv.config({ path: path.resolve(__dirname, '.env') });
 
 const app = express();
 const port = 5000;
@@ -17,8 +17,58 @@ const port = 5000;
 // Configuration
 const TEST_MODE = false; // Set to false to use real OpenAI API
 const ENABLE_SHORT_FORM = true; // Set to false for normal 16:9 videos
+// FFMPEG_GPU=auto|nvenc|qsv|amf|off — auto uses NVENC if available (much faster trim/encode)
+const FFMPEG_GPU = (process.env.FFMPEG_GPU || 'auto').toLowerCase();
 
-app.use(cors());
+function getGpuEncoder() {
+    if (FFMPEG_GPU === 'off') return null;
+    if (FFMPEG_GPU === 'nvenc') return 'h264_nvenc';
+    if (FFMPEG_GPU === 'qsv') return 'h264_qsv';
+    if (FFMPEG_GPU === 'amf') return 'h264_amf';
+    if (FFMPEG_GPU === 'auto') return 'h264_nvenc';
+    return null;
+}
+
+function getVideoEncoderLabel() {
+    return getGpuEncoder() || 'libx264 (CPU)';
+}
+
+function applyVideoEncoderOptions(command, { fast = false } = {}) {
+    const gpu = getGpuEncoder();
+    if (gpu === 'h264_nvenc') {
+        return command.outputOptions([
+            '-c:v', gpu,
+            '-preset', fast ? 'p1' : 'p4',
+            '-cq', '23',
+            '-movflags', '+faststart',
+        ]);
+    }
+    if (gpu === 'h264_qsv') {
+        return command.outputOptions([
+            '-c:v', gpu,
+            '-global_quality', '23',
+            '-movflags', '+faststart',
+        ]);
+    }
+    if (gpu === 'h264_amf') {
+        return command.outputOptions([
+            '-c:v', gpu,
+            '-quality', fast ? 'speed' : 'balanced',
+            '-movflags', '+faststart',
+        ]);
+    }
+    return command.outputOptions([
+        '-c:v', 'libx264',
+        '-preset', fast ? 'ultrafast' : 'fast',
+        '-crf', '18',
+        '-movflags', '+faststart',
+    ]);
+}
+
+app.use(cors({
+    exposedHeaders: ['Content-Type'],
+    allowedHeaders: ['Content-Type', 'X-OpenAI-Key', 'X-ElevenLabs-Key'],
+}));
 app.use(express.json());
 app.use('/clips', express.static(path.join(__dirname, 'clips')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -26,13 +76,7 @@ app.use('/clips', express.static(path.join(__dirname, 'clips')));
 app.use('/temp', express.static(path.join(__dirname, 'temp')));
 
 
-// Initialize OpenAI
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
-});
-
-// ElevenLabs setup
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY3;
+// User-supplied API keys (BYOK demo mode — no server-side OpenAI/ElevenLabs keys)
 const DEFAULT_VOICE_ID = '2EiwWnXFnvU5JabPnv8n';
 
 // Available voice models
@@ -47,14 +91,23 @@ const VOICE_MODELS = {
 
 const getElevenLabsUrl = (voiceId) => `https://api.elevenlabs.io/v1/text-to-speech/${voiceId || DEFAULT_VOICE_ID}`;
 
-// Auth routes
-app.use('/auth', authRouter);
+function getOpenAIKeyFromRequest(req) {
+    return req.headers['x-openai-key']?.trim() || null;
+}
 
-// Subscription routes (protected)
-app.use('/subscription', authMiddleware, subscriptionRouter);
+function getElevenLabsKeyFromRequest(req) {
+    return req.headers['x-elevenlabs-key']?.trim() || null;
+}
 
-// Stripe routes (webhook needs raw body, so it handles its own parsing)
-app.use('/stripe', stripeRouter);
+function getOpenAIClientForRequest(req) {
+    const apiKey = getOpenAIKeyFromRequest(req);
+    if (!apiKey) return null;
+    return new OpenAI({ apiKey });
+}
+
+function getElevenLabsKeyForRequest(req) {
+    return getElevenLabsKeyFromRequest(req);
+}
 
 // Multer setup for file upload
 const storage = multer.diskStorage({
@@ -97,31 +150,335 @@ function groupWordsIntoSubtitles(words, groupSize = 3) {
     return subtitles;
 }
 
-async function runWhisperX(audioPath, outputDir) {
+function safeUnlink(filePath) {
+    if (!filePath || !fs.existsSync(filePath)) return;
+    try {
+        fs.unlinkSync(filePath);
+        console.log(`🗑️ Deleted: ${filePath}`);
+    } catch (err) {
+        console.warn(`⚠️ Could not delete ${filePath}:`, err.message);
+    }
+}
+
+function cleanupTempFiles(filePaths) {
+    for (const filePath of filePaths) {
+        safeUnlink(filePath);
+    }
+}
+
+function cleanupPartialVideoOutputs(finalVideo) {
+    if (!finalVideo) return;
+    cleanupTempFiles([
+        finalVideo,
+        finalVideo.replace('.mp4', '-subtitled.mp4'),
+        finalVideo.replace('.mp4', '-spedup.mp4'),
+        finalVideo.replace('.mp4', '-withmusic.mp4'),
+    ]);
+}
+
+function cleanupPreviousStoryClips() {
+    const clipsDir = 'clips';
+    if (!fs.existsSync(clipsDir)) return;
+
+    for (const file of fs.readdirSync(clipsDir)) {
+        if (file.startsWith('story-') && file.endsWith('.mp4')) {
+            safeUnlink(path.join(clipsDir, file));
+        }
+    }
+}
+
+function sendSse(res, payload) {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    if (typeof res.flush === 'function') {
+        res.flush();
+    }
+}
+
+function startSseResponse(res) {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.status(200);
+    if (typeof res.flushHeaders === 'function') {
+        res.flushHeaders();
+    }
+    // Padding helps some proxies/browsers flush the stream immediately
+    res.write(':' + ' '.repeat(2048) + '\n\n');
+    sendSse(res, { type: 'log', message: 'Connected to server — starting pipeline...' });
+}
+
+async function runFinalizeStoryPipeline({ req, genre, story, voiceId, onProgress }) {
+    const selectedVoiceId = voiceId || DEFAULT_VOICE_ID;
+    const tempFiles = [];
+    let finalVideo = null;
+    let succeeded = false;
+
+    try {
+        onProgress('Cleaning up previous videos...');
+        cleanupPreviousStoryClips();
+
+        onProgress(`Using voice: ${VOICE_MODELS[selectedVoiceId]?.name || 'Unknown'}`);
+
+        let audioPath;
+        if (TEST_MODE) {
+            onProgress('TEST MODE: Using pre-recorded audio...');
+            audioPath = path.join(__dirname, 'temp', 'sample.mp3');
+        } else {
+            const elevenLabsKey = getElevenLabsKeyForRequest(req);
+            if (!elevenLabsKey) {
+                throw new Error('Add your ElevenLabs API key in step 1 before generating.');
+            }
+
+            onProgress('Sending to ElevenLabs for text-to-speech...');
+            const ttsResponse = await fetch(getElevenLabsUrl(selectedVoiceId), {
+                method: 'POST',
+                headers: {
+                    'xi-api-key': elevenLabsKey,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    text: story,
+                    model_id: "eleven_flash_v2_5",
+                    voice_settings: {
+                        stability: 0.4,
+                        similarity_boost: 0.75
+                    }
+                })
+            });
+
+            if (!ttsResponse.ok) {
+                const errText = await ttsResponse.text();
+                throw new Error(`ElevenLabs TTS failed: ${errText}`);
+            }
+
+            audioPath = path.join('temp', `story-${Date.now()}.mp3`);
+            const arrayBuffer = await ttsResponse.arrayBuffer();
+            fs.writeFileSync(audioPath, Buffer.from(arrayBuffer));
+            tempFiles.push(audioPath);
+            onProgress('Voice audio generated.');
+        }
+
+        const getAudioDuration = (audioPath) => {
+            return new Promise((resolve, reject) => {
+                ffmpeg.ffprobe(audioPath, (err, metadata) => {
+                    if (err) return reject(err);
+                    resolve(metadata.format.duration);
+                });
+            });
+        };
+        const audioDuration = await getAudioDuration(audioPath);
+        const bufferedDuration = audioDuration + 0;
+
+        const parkourSource = path.join(__dirname, '/background/parkour1.mp4');
+        const parkourClip = path.join('temp', `parkour-clip-${Date.now()}.mp4`);
+        tempFiles.push(parkourClip);
+        const parkourDuration = await getVideoDuration(parkourSource);
+
+        const maxStart = Math.max(0, parkourDuration - bufferedDuration);
+        const randomStart = parseFloat((Math.random() * maxStart).toFixed(2));
+        onProgress(`Trimming background video (${bufferedDuration.toFixed(1)}s from ${randomStart}s) via ${getVideoEncoderLabel()}...`);
+
+        await new Promise((resolve, reject) => {
+            const command = ffmpeg(parkourSource)
+                .inputOptions(['-ss', String(randomStart)])
+                .duration(bufferedDuration);
+
+            if (ENABLE_SHORT_FORM) {
+                command.videoFilters([
+                    {
+                        filter: 'scale',
+                        options: {
+                            w: 1080,
+                            h: 1920,
+                            force_original_aspect_ratio: 'increase'
+                        }
+                    },
+                    {
+                        filter: 'crop',
+                        options: {
+                            w: 1080,
+                            h: 1920
+                        }
+                    }
+                ]);
+                applyVideoEncoderOptions(command, { fast: true });
+            }
+
+            command
+                .output(parkourClip)
+                .on('end', resolve)
+                .on('error', reject)
+                .run();
+        });
+
+        onProgress('Background clip ready.');
+
+        const outputDir = 'whisperx_output';
+        if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
+        onProgress('Running WhisperX for caption timing (this may take a minute)...');
+        const jsonPath = await runWhisperX(audioPath, outputDir, (msg) => onProgress(`  ${msg}`));
+        tempFiles.push(jsonPath);
+        const words = loadWhisperXWords(jsonPath);
+        onProgress('WhisperX alignment complete.');
+
+        let subtitles;
+
+        if (TEST_MODE) {
+            subtitles = groupWordsIntoSubtitles(words);
+        } else {
+            onProgress('Building subtitle timings from story text...');
+            const storyWords = story.split(/\s+/);
+            const matchedWords = words.map((w, i) => ({
+                start: w.start,
+                end: w.end,
+                text: storyWords[i] || ''
+            }));
+            subtitles = groupWordsIntoSubtitles(matchedWords);
+        }
+
+        finalVideo = path.join('clips', `story-${Date.now()}.mp4`);
+
+        onProgress('Merging narration with background video...');
+        await new Promise((resolve, reject) => {
+            ffmpeg()
+                .input(parkourClip)
+                .input(audioPath)
+                .outputOptions([
+                    '-map', '0:v:0',
+                    '-map', '1:a:0',
+                    '-c:v', 'copy',
+                    '-c:a', 'aac',
+                    '-shortest',
+                    '-movflags', '+faststart',
+                ])
+                .output(finalVideo)
+                .on('end', resolve)
+                .on('error', reject)
+                .run();
+        });
+
+        onProgress('Burning subtitles into video...');
+        const subtitledVideoPath = finalVideo.replace('.mp4', '-subtitled.mp4');
+        await addSubtitlesToClip(finalVideo, subtitles, subtitledVideoPath);
+
+        fs.unlinkSync(finalVideo);
+        fs.renameSync(subtitledVideoPath, finalVideo);
+
+        onProgress('Speeding up video (1.4x)...');
+        const speedUpPath = finalVideo.replace('.mp4', '-spedup.mp4');
+
+        await new Promise((resolve, reject) => {
+            const command = ffmpeg(finalVideo)
+                .videoFilter('setpts=0.7143*PTS')
+                .audioFilter('atempo=1.4');
+            applyVideoEncoderOptions(command);
+            command
+                .output(speedUpPath)
+                .on('end', resolve)
+                .on('error', reject)
+                .run();
+        });
+
+        fs.unlinkSync(finalVideo);
+        fs.renameSync(speedUpPath, finalVideo);
+
+        const musicDir = path.join(__dirname, 'music', genre.toLowerCase());
+        const musicFiles = fs.readdirSync(musicDir).filter(f => f.endsWith('.mp3'));
+
+        if (musicFiles.length === 0) {
+            throw new Error(`No music files found for genre: ${genre}`);
+        }
+
+        const randomMusicFile = musicFiles[Math.floor(Math.random() * musicFiles.length)];
+        const musicPath = path.join(musicDir, randomMusicFile);
+
+        onProgress(`Mixing in background music (${randomMusicFile})...`);
+        const withMusicPath = finalVideo.replace('.mp4', '-withmusic.mp4');
+
+        await new Promise((resolve, reject) => {
+            ffmpeg()
+                .input(finalVideo)
+                .input(musicPath)
+                .inputOptions('-stream_loop', '-1')
+                .complexFilter([
+                    '[1:a]volume=0.15[a1]',
+                    '[0:a][a1]amix=inputs=2:duration=shortest'
+                ])
+                .audioCodec('aac')
+                .videoCodec('copy')
+                .output(withMusicPath)
+                .on('end', resolve)
+                .on('error', reject)
+                .run();
+        });
+
+        fs.unlinkSync(finalVideo);
+        fs.renameSync(withMusicPath, finalVideo);
+
+        succeeded = true;
+        onProgress('Video complete!');
+        return { videoPath: finalVideo, story };
+    } catch (err) {
+        if (!succeeded) {
+            cleanupPartialVideoOutputs(finalVideo);
+        }
+        throw err;
+    } finally {
+        cleanupTempFiles(tempFiles);
+    }
+}
+
+async function runWhisperX(audioPath, outputDir, onLog) {
     return new Promise((resolve, reject) => {
-        const jsonPath = path.join(outputDir, path.basename(audioPath, path.extname(audioPath)) + '.json');
+        const absoluteAudio = path.resolve(audioPath);
+        const absoluteOutput = path.resolve(outputDir);
+        const jsonPath = path.join(
+            absoluteOutput,
+            path.basename(absoluteAudio, path.extname(absoluteAudio)) + '.json'
+        );
 
         const whisper = spawn('whisperx', [
-            audioPath,
-            '--output_dir', outputDir,
+            absoluteAudio,
+            '--output_dir', absoluteOutput,
             '--output_format', 'json',
-            '--language', 'en'
-        ]);
+            '--language', 'en',
+            '--compute_type', 'float32',
+            '--device', 'cpu',
+            '--vad_method', 'silero',
+        ], {
+            env: { ...process.env },
+            shell: process.platform === 'win32',
+        });
 
         whisper.stdout.on('data', (data) => {
-            console.log(`[WhisperX STDOUT] ${data}`);
+            const msg = data.toString().trim();
+            if (msg) onLog?.(msg);
+            console.log(`[WhisperX] ${data}`);
         });
 
         whisper.stderr.on('data', (data) => {
+            const msg = data.toString().trim();
+            if (msg) onLog?.(msg);
             console.error(`[WhisperX STDERR] ${data}`);
+        });
+
+        whisper.on('error', (err) => {
+            reject(new Error(
+                `Failed to start WhisperX: ${err.message}. Make sure it is installed (pip install whisperx) and on your PATH.`
+            ));
         });
 
         whisper.on('close', (code) => {
             if (code === 0) {
+                if (!fs.existsSync(jsonPath)) {
+                    reject(new Error(`WhisperX finished but output file was not found at ${jsonPath}`));
+                    return;
+                }
                 console.log('✅ WhisperX alignment complete.');
                 resolve(jsonPath);
             } else {
-                reject(new Error(`WhisperX exited with code ${code}`));
+                reject(new Error(`WhisperX exited with code ${code}. See log output above for details.`));
             }
         });
     });
@@ -129,21 +486,22 @@ async function runWhisperX(audioPath, outputDir) {
 
 // Generate subtitles only (no burning)
 app.post('/generate-subtitles-json', async (req, res) => {
+    let audioPath;
+    let jsonPath;
+
     try {
         const { clipPath } = req.body;
 
-        const audioPath = await extractAudio(clipPath);
+        audioPath = await extractAudio(clipPath);
         const outputDir = 'whisperx_output';
         if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
 
         console.log("🧠 Running WhisperX on:", audioPath);
-        const jsonPath = await runWhisperX(audioPath, outputDir);
+        jsonPath = await runWhisperX(audioPath, outputDir);
 
         console.log("📖 Parsing WhisperX output JSON:", jsonPath);
         const words = loadWhisperXWords(jsonPath);
         const subtitles = groupWordsIntoSubtitles(words);
-
-        fs.unlinkSync(audioPath);
 
         res.json({
             success: true,
@@ -156,6 +514,8 @@ app.post('/generate-subtitles-json', async (req, res) => {
             success: false,
             error: "Failed to generate subtitle JSON"
         });
+    } finally {
+        cleanupTempFiles([audioPath, jsonPath]);
     }
 });
 
@@ -174,11 +534,12 @@ function extractAudio(videoPath) {
 }
 
 // Get transcript from audio using Whisper
-async function getTranscript(audioPath) {
+async function getTranscript(audioPath, openai) {
     if (TEST_MODE) {
         console.log("TEST MODE: Using sample transcript");
         return SAMPLE_DATA.transcript;
     }
+    if (!openai) throw new Error('OpenAI API key required');
 
     try {
         const response = await openai.audio.transcriptions.create({
@@ -193,11 +554,12 @@ async function getTranscript(audioPath) {
 }
 
 // Get transcript with word-level timings
-async function getTimedTranscript(audioPath) {
+async function getTimedTranscript(audioPath, openai) {
     if (TEST_MODE) {
         console.log("TEST MODE: Using sample timed transcript");
         return SAMPLE_DATA.timedTranscript;
     }
+    if (!openai) throw new Error('OpenAI API key required');
 
     const response = await openai.audio.transcriptions.create({
         file: fs.createReadStream(audioPath),
@@ -392,11 +754,12 @@ async function addSubtitlesToClip(clipPath, subtitles, outputPath) {
     }
 }
 // Helper function to analyze transcript and find highlights
-async function findHighlights(transcript, videoDuration) {
+async function findHighlights(transcript, videoDuration, openai) {
     if (TEST_MODE) {
         console.log("TEST MODE: Using sample highlights");
         return SAMPLE_DATA.highlights;
     }
+    if (!openai) throw new Error('OpenAI API key required');
 
     const prompt = `
 You are a professional video editor specializing in creating viral short-form content. Analyze this transcript and identify the absolute BEST clips (10-90 seconds each) that would perform well on platforms like TikTok, Instagram Reels, and YouTube Shorts.
@@ -476,6 +839,14 @@ app.post('/generate-story-text', async (req, res) => {
             console.log('🧪 TEST MODE: Skipping GPT story generation...');
             story = 'Test mode enabled – using pre-recorded audio.';
         } else {
+            const openai = getOpenAIClientForRequest(req);
+            if (!openai) {
+                return res.status(400).json({
+                    error: 'No OpenAI API key configured',
+                    message: 'Add your OpenAI API key in step 1 before generating a story.'
+                });
+            }
+
             console.log('📚 Generating story from GPT...');
             const storyPrompt = `
 You are a Reddit user writing a story that fits perfectly in r/${genre.toLowerCase()}.
@@ -565,10 +936,15 @@ app.get('/preview-voice/:voiceId', async (req, res) => {
     try {
         console.log(`🎙️ Generating voice preview for ${VOICE_MODELS[voiceId].name}...`);
         
+        const elevenLabsKey = getElevenLabsKeyForRequest(req);
+        if (!elevenLabsKey) {
+            return res.status(400).json({ error: 'No ElevenLabs API key configured. Add your key to continue.' });
+        }
+
         const ttsResponse = await fetch(getElevenLabsUrl(voiceId), {
             method: 'POST',
             headers: {
-                'xi-api-key': ELEVENLABS_API_KEY,
+                'xi-api-key': elevenLabsKey,
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
@@ -604,246 +980,34 @@ app.get('/preview-voice/:voiceId', async (req, res) => {
     }
 });
 
-// The rest of the original `/generate-story` remains, expecting the reviewed story from frontend
-// Protected route with quota check
-app.post('/finalize-story', authMiddleware, checkQuota, async (req, res) => {
-    const { genre, story, voiceId, backgroundType } = req.body;
-    if (!genre || !story) return res.status(400).json({ error: 'Genre and story are required' });
-    
-    // Log quota info
-    console.log(`📊 User ${req.user.id} generating video (${req.quota.used + 1}/${req.quota.limit} this month)`);
+app.post('/finalize-story', async (req, res) => {
+    const { genre, story, voiceId } = req.body;
+    if (!genre || !story) {
+        return res.status(400).json({ error: 'Genre and story are required' });
+    }
 
-    const selectedVoiceId = voiceId || DEFAULT_VOICE_ID;
-    console.log(`🎙️ Using voice: ${VOICE_MODELS[selectedVoiceId]?.name || 'Unknown'} (${selectedVoiceId})`);
+    if (!TEST_MODE && !getElevenLabsKeyForRequest(req)) {
+        return res.status(400).json({
+            error: 'No ElevenLabs API key configured',
+            message: 'Add your ElevenLabs API key in step 1 before generating.'
+        });
+    }
+
+    startSseResponse(res);
+
+    const onProgress = (message) => {
+        console.log(message);
+        sendSse(res, { type: 'log', message });
+    };
 
     try {
-
-        let audioPath;
-        if (TEST_MODE) {
-            console.log('🧪 TEST MODE: Skipping ElevenLabs, using pre-existing MP3...');
-            audioPath = path.join(__dirname, 'temp', 'sample.mp3');
-        } else {
-            console.log('🗣️ Sending to ElevenLabs for TTS...');
-            const ttsResponse = await fetch(getElevenLabsUrl(selectedVoiceId), {
-                method: 'POST',
-                headers: {
-                    'xi-api-key': ELEVENLABS_API_KEY,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    text: story,
-                    model_id: "eleven_flash_v2_5",
-                    voice_settings: {
-                        stability: 0.4,
-                        similarity_boost: 0.75
-                    }
-                })
-            });
-
-            if (!ttsResponse.ok) {
-                const errText = await ttsResponse.text();
-                console.error('❌ ElevenLabs TTS error:', errText);
-                throw new Error(`Failed to generate voice: ${errText}`);
-            }
-
-            audioPath = path.join('temp', `story-${Date.now()}.mp3`);
-            const arrayBuffer = await ttsResponse.arrayBuffer();
-            fs.writeFileSync(audioPath, Buffer.from(arrayBuffer));
-        }
-
-        const getAudioDuration = (audioPath) => {
-            return new Promise((resolve, reject) => {
-                ffmpeg.ffprobe(audioPath, (err, metadata) => {
-                    if (err) return reject(err);
-                    resolve(metadata.format.duration);
-                });
-            });
-        };
-        const audioDuration = await getAudioDuration(audioPath);
-        const bufferedDuration = audioDuration + 0; // modify buffer duration here, for avoiding abrupt audio
-        // i set it to zero because it messed with subtitles timing.
-
-        const parkourSource = path.join(__dirname, '/background/parkour1.mp4');
-        const parkourClip = path.join('temp', `parkour-clip-${Date.now()}.mp4`);
-        const parkourDuration = await getVideoDuration(parkourSource);
-
-        const maxStart = Math.max(0, parkourDuration - bufferedDuration);
-        const randomStart = parseFloat((Math.random() * maxStart).toFixed(2));
-        console.log(`🎯 Trimming video from ${randomStart}s for ${bufferedDuration}s (maxStart: ${maxStart})`);
-        console.log("🎞️ Parkour duration:", parkourDuration);
-        console.log("🔊 Audio + buffer duration:", bufferedDuration);
-
-        await new Promise((resolve, reject) => {
-            const command = ffmpeg(parkourSource)
-                .setStartTime(randomStart)
-                .setDuration(bufferedDuration);
-
-            if (ENABLE_SHORT_FORM) {
-                command
-                    .videoFilters([
-                        {
-                            filter: 'scale',
-                            options: {
-                                w: 1080,
-                                h: 1920,
-                                force_original_aspect_ratio: 'increase'
-                            }
-                        },
-                        {
-                            filter: 'crop',
-                            options: {
-                                w: 1080,
-                                h: 1920
-                            }
-                        }
-                    ])
-                    .outputOptions([
-                        '-movflags +faststart',
-                        '-preset fast',
-                        '-crf 18'
-                    ]);
-            }
-
-            command
-                .output(parkourClip)
-                .on('end', resolve)
-                .on('error', reject)
-                .run();
-        });
-
-
-
-        const outputDir = 'whisperx_output';
-        if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
-        const jsonPath = await runWhisperX(audioPath, outputDir);
-        const words = loadWhisperXWords(jsonPath);
-
-
-        let subtitles;
-
-        if (TEST_MODE) {
-            console.log("⚠️ TEST MODE: Using WhisperX word timings directly for subtitles");
-            subtitles = groupWordsIntoSubtitles(words);
-        } else {
-            console.log("🧠 Aligning generated story text to WhisperX timings");
-            const storyWords = story.split(/\s+/);
-            const matchedWords = words.map((w, i) => ({
-                start: w.start,
-                end: w.end,
-                text: storyWords[i] || ''
-            }));
-            subtitles = groupWordsIntoSubtitles(matchedWords);
-        }
-
-        const finalVideo = path.join('clips', `story-${Date.now()}.mp4`);
-
-        console.log("🔊 Merging audio from:", audioPath);
-        console.log("🎞️ Merging into video:", parkourClip);
-        console.log("📤 Output path will be:", finalVideo);
-
-        await new Promise((resolve, reject) => {
-            ffmpeg()
-                .input(parkourClip)     // 🎥 Video
-                .input(audioPath)       // 🔊 Audio
-                .videoCodec('libx264')
-                .audioCodec('aac')
-                .outputOptions([
-                    '-map 0:v:0',        // map video stream
-                    '-map 1:a:0',        // map audio stream
-                    '-shortest'          // cut to shortest of video/audio
-                ])
-                .output(finalVideo)
-                .on('start', (cmdLine) => {
-                    console.log("📸 ffmpeg merge command:", cmdLine);
-                })
-                .on('end', resolve)
-                .on('error', (err) => {
-                    console.error("❌ ffmpeg merge error:", err);
-                    reject(err);
-                })
-                .run();
-        });
-
-
-        const subtitledVideoPath = finalVideo.replace('.mp4', '-subtitled.mp4');
-        await addSubtitlesToClip(finalVideo, subtitles, subtitledVideoPath);
-
-// Overwrite original with subtitled version
-        fs.unlinkSync(finalVideo);
-        fs.renameSync(subtitledVideoPath, finalVideo);
-
-// Speed up then repeat replacement
-        const speedUpPath = finalVideo.replace('.mp4', '-spedup.mp4');
-
-        await new Promise((resolve, reject) => {
-            ffmpeg(finalVideo)
-                .videoFilter('setpts=0.7143*PTS') // 1 / 1.4 = ~0.7143 division to set pitch of audio
-                .audioFilter('atempo=1.4')        // audio tempo
-                .outputOptions('-movflags +faststart')
-                .output(speedUpPath)
-                .on('end', resolve)
-                .on('error', reject)
-                .run();
-        });
-
-        fs.unlinkSync(finalVideo); // remove the original
-        fs.renameSync(speedUpPath, finalVideo); // overwrite with sped-up version
-
-
-        const musicDir = path.join(__dirname, 'music', genre.toLowerCase());
-        const musicFiles = fs.readdirSync(musicDir).filter(f => f.endsWith('.mp3'));
-
-        if (musicFiles.length === 0) {
-            throw new Error(`No music files found for genre: ${genre}`);
-        }
-
-        const randomMusicFile = musicFiles[Math.floor(Math.random() * musicFiles.length)];
-        const musicPath = path.join(musicDir, randomMusicFile);
-
-        console.log(`🎵 Adding background music from: ${musicPath}`);
-
-        const withMusicPath = finalVideo.replace('.mp4', '-withmusic.mp4');
-
-        await new Promise((resolve, reject) => {
-            ffmpeg()
-                .input(finalVideo)           // Original sped-up video
-                .input(musicPath)            // Background music
-                .inputOptions('-stream_loop', '-1') // loop music infinitely
-
-                .complexFilter([
-                    '[1:a]volume=0.15[a1]',  // Lower volume of music
-                    '[0:a][a1]amix=inputs=2:duration=shortest' // cuts music to shortest of video/audio
-                ])
-                .audioCodec('aac')
-                .videoCodec('copy')          // Copy video stream
-                .output(withMusicPath)
-                .on('end', resolve)
-                .on('error', reject)
-                .run();
-        });
-
-// Replace final video with version that has music
-        fs.unlinkSync(finalVideo);
-        fs.renameSync(withMusicPath, finalVideo);
-
-        // Record the generation for quota tracking
-        const updatedUsage = incrementUserGeneration(req.user.id);
-        console.log(`✅ Generation recorded for user ${req.user.id} (${updatedUsage.generations} total this month)`);
-
-        res.json({
-            success: true,
-            story,
-            videoPath: finalVideo,
-            usage: {
-                used: updatedUsage.generations,
-                limit: req.quota.limit,
-                remaining: req.quota.limit - updatedUsage.generations
-            }
-        });
-
+        const result = await runFinalizeStoryPipeline({ req, genre, story, voiceId, onProgress });
+        sendSse(res, { type: 'complete', videoPath: result.videoPath });
+        res.end();
     } catch (err) {
-        console.error("Failed to finalize story:", err);
-        res.status(500).json({ error: 'Failed to finalize story', details: err.message || err.toString() });
+        console.error('Failed to finalize story:', err);
+        sendSse(res, { type: 'error', message: err.message || 'Failed to finalize story' });
+        res.end();
     }
 });
 
@@ -876,22 +1040,22 @@ app.post('/generate-clip', upload.single('video'), async (req, res) => {
 
 // MODIFIED: add-subtitles route using WhisperX
 app.post('/add-subtitles', async (req, res) => {
+    let audioPath;
+    let jsonPath;
+
     try {
         const { clipPath } = req.body;
 
-        const audioPath = await extractAudio(clipPath);
+        audioPath = await extractAudio(clipPath);
         const outputDir = 'whisperx_output';
         if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
 
         console.log("🧠 Running WhisperX on:", audioPath);
-        console.log("👉 Command:", command);
-        const jsonPath = await runWhisperX(audioPath, outputDir);
+        jsonPath = await runWhisperX(audioPath, outputDir);
 
         console.log("📖 Parsing WhisperX output JSON:", jsonPath);
         const words = loadWhisperXWords(jsonPath);
         const subtitles = groupWordsIntoSubtitles(words);
-
-        fs.unlinkSync(audioPath);
 
         const subbedPath = clipPath.replace('.mp4', '-subbed.mp4');
         await addSubtitlesToClip(clipPath, subtitles, subbedPath);
@@ -910,6 +1074,8 @@ app.post('/add-subtitles', async (req, res) => {
             success: false,
             error: "Failed to add subtitles"
         });
+    } finally {
+        cleanupTempFiles([audioPath, jsonPath]);
     }
 });
 
@@ -936,9 +1102,19 @@ app.post('/burn-edited-subtitles', async (req, res) => {
 
 // Auto-generate clips endpoint (basic clips only)
 app.post('/auto-generate-clips', upload.single('video'), async (req, res) => {
+    let audioPath;
+
     try {
         if (!req.file) {
             return res.status(400).json({ error: "No video file uploaded" });
+        }
+
+        const openai = getOpenAIClientForRequest(req);
+        if (!openai && !TEST_MODE) {
+            return res.status(400).json({
+                error: 'No OpenAI API key configured',
+                message: 'Add your OpenAI API key to continue.'
+            });
         }
 
         const videoPath = req.file.path;
@@ -953,18 +1129,17 @@ app.post('/auto-generate-clips', upload.single('video'), async (req, res) => {
 
         // Extract audio
         console.log(`🎧 Extracting audio from video...`);
-        const audioPath = await extractAudio(videoPath);
+        audioPath = await extractAudio(videoPath);
         console.log(`✅ Audio extracted: ${audioPath}`);
 
         // Get transcript
         console.log(`📝 Transcribing audio with Whisper...`);
-        const transcript = await getTranscript(audioPath);
-        fs.unlinkSync(audioPath);
+        const transcript = await getTranscript(audioPath, openai);
         console.log(`✅ Transcription complete.`);
 
         // Find highlights
         console.log(`✨ Finding viral highlights in transcript...`);
-        const clips = await findHighlights(transcript, duration);
+        const clips = await findHighlights(transcript, duration, openai);
         console.log(`🎯 Found ${clips.length} highlight(s).`);
 
         const generatedClips = [];
@@ -1004,10 +1179,25 @@ app.post('/auto-generate-clips', upload.single('video'), async (req, res) => {
             error: "Clip generation failed",
             details: error.message
         });
+    } finally {
+        cleanupTempFiles([audioPath]);
     }
 });
 
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
     console.log(`Server running on port ${port}`);
+    console.log(`FFmpeg encoder: ${getVideoEncoderLabel()} (set FFMPEG_GPU=off to force CPU)`);
+    console.log('Press Ctrl+C to stop.');
+});
+
+server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        console.error(`\nPort ${port} is already in use — another server is still running.`);
+        console.error('Find it with: netstat -ano | findstr :5000');
+        console.error('Then kill that PID, or stop it with Ctrl+C in its terminal.\n');
+    } else {
+        console.error('Server failed to start:', err.message);
+    }
+    process.exit(1);
 });

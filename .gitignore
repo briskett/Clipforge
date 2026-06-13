@@ -32,4 +32,5 @@ backend/whisperx_output
 *.mp4
 
 *.env*
+!.env.example
 *.env

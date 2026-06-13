@@ -158,9 +158,7 @@ export default function Terms() {
                 <div className="legal-footer">
                     <Link to="/privacy">Privacy Policy</Link>
                     <span className="footer-dot">•</span>
-                    <Link to="/login">Sign In</Link>
-                    <span className="footer-dot">•</span>
-                    <Link to="/signup">Create Account</Link>
+                    <Link to="/">Back to ClipForge</Link>
                 </div>
             </div>
         </div>
