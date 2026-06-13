@@ -4,7 +4,7 @@ Turn Reddit-style stories into vertical short-form videos (9:16) — GPT writes 
 
 **Live demo mode:** no accounts, no server-side API keys. Users bring their own OpenAI and ElevenLabs keys in the wizard (stored in browser localStorage only).
 
-**Demo:**
+**Output:**
 [![ClipForge demo](https://img.youtube.com/vi/6MkIO42Usqk/maxresdefault.jpg)](https://www.youtube.com/shorts/6MkIO42Usqk)
 [Watch here](https://www.youtube.com/shorts/6MkIO42Usqk)
 
